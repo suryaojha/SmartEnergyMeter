@@ -9,7 +9,8 @@ const userSchema = new mongoose.Schema({
   resetCodeHash: { type: String, default: null },
   resetCodeExpiry: { type: Date, default: null },
   resetCodeSentAt: { type: Date, default: null },
-  resetCodeAttempts: { type: Number, default: 0 }
+  resetCodeAttempts: { type: Number, default: 0 },
+  reportRequestSentAt: { type: Date, default: null }
 }, { timestamps: true });
 
 module.exports = mongoose.model("User", userSchema);

@@ -23,8 +23,9 @@ document.getElementById("resetForm").addEventListener("submit", async event => {
     const data = await response.json();
     if (!response.ok) throw new Error(data.message || "Could not reset password");
     sessionStorage.removeItem("passwordResetEmail");
-    message.textContent = data.message;
+    message.textContent = `${data.message} Redirecting to sign in…`;
     document.getElementById("resetForm").reset();
+    window.setTimeout(() => location.replace("/login.html?passwordReset=success"), 900);
   } catch (error) {
     message.textContent = error.message;
   }

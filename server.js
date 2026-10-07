@@ -15,6 +15,7 @@ const TariffSlab = require("./models/TariffSlab");
 const BillingSettings = require("./models/BillingSettings");
 const WifiProvisioning = require("./models/WifiProvisioning");
 const SmtpSettings = require("./models/SmtpSettings");
+const ReportSettings = require("./models/ReportSettings");
 const { auth, adminOnly } = require("./middleware/auth");
 
 const app = express();
@@ -256,6 +257,153 @@ function createSmtpTransport(config) {
     secure: config.port === 465,
     auth: { user: config.username, pass: config.password }
   });
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, character => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
+  })[character]);
+}
+
+function reportBillRows(daily, slabs, settings) {
+  let cumulativeKwh = 0;
+  const rows = [];
+  for (const entry of daily) {
+    if (entry.kwh == null) {
+      rows.push({ ...entry, cost: null });
+      continue;
+    }
+    const previousKwh = cumulativeKwh;
+    cumulativeKwh += entry.kwh;
+    const incremental = billDifference(cumulativeKwh, previousKwh, entry.kwh, slabs, settings);
+    rows.push({ ...entry, cost: incremental.cost });
+  }
+  return rows;
+}
+
+async function buildEnergyReport(meter, days, endExclusive = new Date()) {
+  const reportEnd = new Date(endExclusive);
+  const reportStart = addIndiaDays(indiaStart(new Date(reportEnd.getTime() - 1)), -(days - 1));
+  const measuredRows = await consumptionFor(meter.meterId, reportStart, reportEnd);
+  const rowsByDate = new Map(measuredRows.map(row => [row.date, row]));
+  const daily = Array.from({ length: days }, (_, index) => {
+    const date = addIndiaDays(reportStart, index).toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+    const row = rowsByDate.get(date);
+    return row ? { ...row } : { date, kwh: null, samples: 0 };
+  });
+  const slabs = await TariffSlab.find().sort({ minKwh: 1 }).lean();
+  const settings = await BillingSettings.findOne({ key: "default" }).lean() || {};
+  const totalKwh = sumMeasured(daily);
+  const bill = calculateBill(totalKwh, slabs, settings, days >= 27);
+  const priorStart = addIndiaDays(reportStart, -days);
+  const previousKwh = await periodConsumption(meter.meterId, priorStart, reportStart);
+  const previousBill = calculateBill(previousKwh, slabs, settings, days >= 27);
+  const measuredDaily = daily.filter(row => row.kwh != null);
+  const averageDailyKwh = measuredDaily.length
+    ? measuredDaily.reduce((total, row) => total + row.kwh, 0) / measuredDaily.length
+    : null;
+  const highestUsageDay = measuredDaily.reduce((highest, row) => !highest || row.kwh > highest.kwh ? row : highest, null);
+  const peak = await Reading.findOne({
+    meterId: meter.meterId,
+    power: { $type: "number" },
+    createdAt: { $gte: reportStart, $lt: reportEnd }
+  }).sort({ power: -1 }).select("power createdAt").lean();
+  const meterOnline = online(meter);
+  const alerts = [];
+  if (settings.alertsEnabled !== false) {
+    if (!meterOnline) alerts.push("Meter is offline or has not sent recent data.");
+    if (meter.voltage != null && settings.minVoltage != null && meter.voltage < settings.minVoltage) alerts.push(`Under-voltage: ${meter.voltage} V is below ${settings.minVoltage} V.`);
+    if (meter.voltage != null && settings.maxVoltage != null && meter.voltage > settings.maxVoltage) alerts.push(`Over-voltage: ${meter.voltage} V exceeds ${settings.maxVoltage} V.`);
+    if (meter.current != null && settings.maxCurrent != null && meter.current > settings.maxCurrent) alerts.push(`Over-current: ${meter.current} A exceeds ${settings.maxCurrent} A.`);
+    if (meter.power != null && settings.maxPower != null && meter.power > settings.maxPower) alerts.push(`Over-power: ${meter.power} W exceeds ${settings.maxPower} W.`);
+    if (meter.powerFactor != null && settings.minPowerFactor != null && meter.powerFactor < settings.minPowerFactor) alerts.push(`Low power factor: ${meter.powerFactor} is below ${settings.minPowerFactor}.`);
+    const peakDailyKwh = daily.reduce((max, row) => row.kwh == null ? max : Math.max(max, row.kwh), 0);
+    if (settings.dailyEnergyLimit != null && peakDailyKwh > settings.dailyEnergyLimit) alerts.push(`Daily energy limit exceeded: ${peakDailyKwh.toFixed(3)} kWh against ${settings.dailyEnergyLimit} kWh.`);
+    if (settings.dailyCostLimit != null && daily.some(row => row.cost != null && row.cost > settings.dailyCostLimit)) alerts.push(`Daily cost limit exceeded (${settings.dailyCostLimit}).`);
+    if (days >= 27 && settings.monthlyCostLimit != null && bill.cost != null && bill.cost > settings.monthlyCostLimit) alerts.push(`Monthly budget exceeded: ₹${bill.cost.toFixed(2)} against ₹${settings.monthlyCostLimit.toFixed(2)}.`);
+  }
+  const withCosts = reportBillRows(daily, slabs, settings);
+  return {
+    meter,
+    start: reportStart,
+    end: reportEnd,
+    days,
+    daily: withCosts,
+    totalKwh,
+    bill,
+    previousKwh,
+    previousBill,
+    averageDailyKwh,
+    highestUsageDay,
+    peak,
+    alerts,
+    settings
+  };
+}
+
+function renderEnergyReportHtml(user, reports, title) {
+  const formatMoney = value => value == null ? "Unavailable" : `₹${Number(value).toFixed(2)}`;
+  const formatUnits = value => value == null ? "Unavailable" : `${Number(value).toFixed(3)} kWh`;
+  const meterSections = reports.map(report => {
+    const graphRows = report.daily.filter(row => row.kwh != null || row.cost != null);
+    const maxKwh = Math.max(0, ...graphRows.map(row => row.kwh || 0));
+    const maxCost = Math.max(0, ...graphRows.map(row => row.cost || 0));
+    const chart = graphRows.length ? graphRows.map(row => {
+      const usageWidth = maxKwh ? Math.max(2, (row.kwh || 0) / maxKwh * 100) : 0;
+      const costWidth = maxCost ? Math.max(2, (row.cost || 0) / maxCost * 100) : 0;
+      return `<tr><td style="padding:7px 6px;border-bottom:1px solid #e2e8f0;white-space:nowrap">${escapeHtml(row.date)}</td><td style="padding:7px 6px;border-bottom:1px solid #e2e8f0;width:42%">${row.kwh == null ? "—" : `<div style="height:10px;width:${usageWidth}%;background:#2563eb;border-radius:8px"></div>`}</td><td style="padding:7px 6px;border-bottom:1px solid #e2e8f0">${formatUnits(row.kwh)}</td><td style="padding:7px 6px;border-bottom:1px solid #e2e8f0;width:30%">${row.cost == null ? "—" : `<div style="height:10px;width:${costWidth}%;background:#10b981;border-radius:8px"></div>`}</td><td style="padding:7px 6px;border-bottom:1px solid #e2e8f0">${formatMoney(row.cost)}</td></tr>`;
+    }).join("") : `<tr><td colspan="5" style="padding:12px;color:#64748b">No meter readings were received during this period.</td></tr>`;
+    const alertBlock = report.alerts.length
+      ? `<div style="padding:14px 16px;margin:16px 0;background:#fff7ed;border-left:4px solid #f97316;border-radius:8px"><b>Active alerts</b><ul style="margin:8px 0 0;padding-left:20px">${report.alerts.map(alert => `<li style="margin:5px 0">${escapeHtml(alert)}</li>`).join("")}</ul></div>`
+      : `<div style="padding:12px 16px;margin:16px 0;background:#ecfdf5;border-left:4px solid #10b981;border-radius:8px"><b>No active configured alerts for this meter.</b></div>`;
+    const previous = report.previousBill.cost == null
+      ? "Previous period comparison unavailable"
+      : `Previous comparable period: ${formatUnits(report.previousKwh)} · ${formatMoney(report.previousBill.cost)} · ${report.bill.cost == null ? "" : `${report.bill.cost <= report.previousBill.cost ? "↓" : "↑"} ${formatMoney(Math.abs(report.bill.cost - report.previousBill.cost))}`}`;
+    const budget = report.days >= 27 && report.settings.monthlyCostLimit != null && report.bill.cost != null
+      ? `<p style="font-size:13px">Monthly budget: <b>${formatMoney(report.bill.cost)}</b> of <b>${formatMoney(report.settings.monthlyCostLimit)}</b>${report.settings.monthlyCostLimit > 0 ? ` (${(report.bill.cost / report.settings.monthlyCostLimit * 100).toFixed(1)}% used)` : ""}</p>`
+      : "";
+    const target = report.settings.consumptionTargetKwh == null
+      ? ""
+      : `<p style="font-size:13px">Daily consumption target: <b>${report.averageDailyKwh == null ? "Unavailable" : `${report.averageDailyKwh.toFixed(3)} kWh average`} </b> against ${Number(report.settings.consumptionTargetKwh).toFixed(3)} kWh.</p>`;
+    const technical = [
+      ["Status", online(report.meter) ? "LIVE" : "OFFLINE"],
+      ["Voltage", report.meter.voltage == null ? "Unavailable" : `${report.meter.voltage} V`],
+      ["Current", report.meter.current == null ? "Unavailable" : `${report.meter.current} A`],
+      ["Power", report.meter.power == null ? "Unavailable" : `${report.meter.power} W`],
+      ["Power factor", report.meter.powerFactor == null ? "Unavailable" : report.meter.powerFactor],
+      ["Frequency", report.meter.frequency == null ? "Unavailable" : `${report.meter.frequency} Hz`],
+      ["Relay", report.meter.status || "Unavailable"],
+      ["Last data received", report.meter.lastSeen ? new Date(report.meter.lastSeen).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) : "Never"]
+    ].map(([label, value]) => `<tr><td style="padding:7px;border-bottom:1px solid #e2e8f0;color:#64748b">${label}</td><td style="padding:7px;border-bottom:1px solid #e2e8f0;font-weight:600">${escapeHtml(value)}</td></tr>`).join("");
+    return `<section style="margin-top:24px;padding-top:20px;border-top:1px solid #e2e8f0"><h2 style="margin:0 0 5px;font-size:20px">${escapeHtml(report.meter.meterName || report.meter.meterId)}</h2><p style="margin:0 0 14px;color:#64748b">Meter ${escapeHtml(report.meter.meterId)} · ${report.start.toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" })} – ${new Date(report.end.getTime() - 1).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" })}</p><table role="presentation" style="width:100%;border-collapse:collapse"><tr><td style="padding:12px;background:#eff6ff;border-radius:8px"><small>ENERGY USED</small><div style="font-size:22px;font-weight:700">${formatUnits(report.totalKwh)}</div></td><td style="padding:12px 6px"></td><td style="padding:12px;background:#ecfdf5;border-radius:8px"><small>ESTIMATED COST</small><div style="font-size:22px;font-weight:700">${formatMoney(report.bill.cost)}</div></td></tr></table><p style="color:#64748b;font-size:13px">${previous}</p><p style="font-size:13px">Daily average: <b>${formatUnits(report.averageDailyKwh)}</b> · Highest-use day: <b>${report.highestUsageDay ? `${escapeHtml(report.highestUsageDay.date)} (${formatUnits(report.highestUsageDay.kwh)})` : "Unavailable"}</b></p>${target}${budget}<p style="font-size:13px">Peak load: <b>${report.peak ? `${Number(report.peak.power).toFixed(1)} W` : "Unavailable"}</b>${report.peak ? ` at ${new Date(report.peak.createdAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}` : ""}</p>${report.bill.cost == null ? `<p style="color:#64748b">Cost is unavailable until tariffs and enough real meter readings are configured.</p>` : `<table role="presentation" style="width:100%;font-size:13px;color:#475569"><tr><td>Energy charges</td><td>${formatMoney(report.bill.energyCharges)}</td><td>FAC</td><td>${formatMoney(report.bill.fac)}</td></tr><tr><td>Electricity duty</td><td>${formatMoney(report.bill.electricityDuty)}</td><td>Wheeling</td><td>${formatMoney(report.bill.wheelingCharges)}</td></tr><tr><td>Fixed / other charges</td><td colspan="3">${formatMoney(report.bill.fixedCharges + report.bill.otherCharges)}</td></tr></table>`}${alertBlock}<h3 style="font-size:16px;margin:18px 0 8px">Daily usage and cost trend</h3><p style="margin:0 0 8px;color:#64748b;font-size:12px">Blue bars show kWh; green bars show estimated daily cost. Unavailable days are not represented as zero.</p><div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="text-align:left;background:#f8fafc"><th style="padding:7px 6px">Date</th><th style="padding:7px 6px">Usage graph</th><th style="padding:7px 6px">Units</th><th style="padding:7px 6px">Cost graph</th><th style="padding:7px 6px">Cost</th></tr></thead><tbody>${chart}</tbody></table></div><h3 style="font-size:16px;margin:18px 0 8px">Live meter parameters</h3><table style="width:100%;border-collapse:collapse;font-size:13px">${technical}</table></section>`;
+  }).join("");
+  return `<div style="margin:0;padding:28px 12px;background:#f1f5f9;font-family:Arial,sans-serif;color:#172033"><main style="max-width:760px;margin:auto;padding:28px;background:#fff;border:1px solid #e2e8f0;border-radius:16px"><p style="margin:0 0 8px;color:#2563eb;font-weight:700">SMART ENERGY METER</p><h1 style="margin:0 0 8px;font-size:26px">${escapeHtml(title)}</h1><p style="color:#475569">Hello ${escapeHtml(user.name || "there")}, here is your energy report. All figures below are calculated from readings received by your meter; unavailable values are not filled with sample data.</p>${meterSections}<footer style="margin-top:24px;padding-top:16px;border-top:1px solid #e2e8f0;color:#64748b;font-size:12px">Costs are estimates based on the configured tariff and charges, not a utility-issued bill. This report was sent to your registered account email.</footer></main></div>`;
+}
+
+function renderEnergyReportText(user, reports, title) {
+  return `${title}\nHello ${user.name || "there"},\n\n${reports.map(report => {
+    const lines = report.daily.map(row => `${row.date}: ${row.kwh == null ? "Unavailable" : `${row.kwh.toFixed(3)} kWh`} · ${row.cost == null ? "Unavailable" : `₹${row.cost.toFixed(2)}`}`);
+    return `${report.meter.meterName || report.meter.meterId} (${report.meter.meterId})\nPeriod: ${report.start.toISOString()} to ${report.end.toISOString()}\nEnergy: ${report.totalKwh == null ? "Unavailable" : `${report.totalKwh.toFixed(3)} kWh`}\nEstimated cost: ${report.bill.cost == null ? "Unavailable" : `₹${report.bill.cost.toFixed(2)}`}\nAlerts: ${report.alerts.length ? report.alerts.join("; ") : "No active configured alerts"}\nDaily trend:\n${lines.join("\n")}`;
+  }).join("\n\n")}\n\nCosts are estimates based on configured tariffs, not an official utility bill.`;
+}
+
+async function sendEnergyReport(user, meters, days, title, endExclusive = new Date()) {
+  if (!meters.length) throw new Error("No assigned meter is available for this report.");
+  const config = await getSmtpConfig();
+  if (!config.host || !config.username || !config.password) {
+    throw new Error("SMTP is not configured. Ask the administrator to configure mail delivery.");
+  }
+  const reports = [];
+  for (const meter of meters) reports.push(await buildEnergyReport(meter, days, endExclusive));
+  const transporter = createSmtpTransport(config);
+  await transporter.sendMail({
+    from: config.from,
+    to: user.email,
+    subject: `Smart Energy Meter — ${title}`,
+    text: renderEnergyReportText(user, reports, title),
+    html: renderEnergyReportHtml(user, reports, title)
+  });
+  return reports;
 }
 
 function wifiEncryptionKey() {
@@ -721,18 +869,6 @@ app.put("/api/admin/meters/:meterId/frequency", auth, adminOnly, async (req, res
   res.json({ message: `Update frequency set to ${meter.updateFrequency} seconds`, meter: publicMeter(meter) });
 });
 
-app.put("/api/admin/meters/:meterId/config", auth, adminOnly, async (req, res) => {
-  const meterName = String(req.body.meterName || "").trim();
-  if (meterName.length > 80) return res.status(400).json({ message: "Meter name must be 80 characters or fewer" });
-  const meter = await Meter.findOneAndUpdate(
-    { meterId: req.params.meterId.toUpperCase() },
-    { meterName },
-    { new: true, runValidators: true }
-  ).populate("userId", "name email");
-  if (!meter) return res.status(404).json({ message: "Meter not found" });
-  res.json({ message: "Meter name saved", meter: publicMeter(meter) });
-});
-
 app.put("/api/admin/meters/:meterId/command", auth, adminOnly, async (req, res) => {
   const command = String(req.body.command || "").toUpperCase();
   if (!["ON", "OFF"].includes(command)) return res.status(400).json({ message: "Command must be ON or OFF" });
@@ -755,6 +891,39 @@ app.put("/api/user/meters/:meterId/command", auth, async (req, res) => {
   meter.command = command;
   await meter.save();
   res.json({ message: `Command ${command} saved`, meter: publicMeter(meter) });
+});
+
+app.post("/api/user/reports/request", auth, async (req, res) => {
+  try {
+    const days = Number(req.body.days);
+    const meterId = String(req.body.meterId || "").toUpperCase();
+    if (![1, 7, 30, 90].includes(days)) {
+      return res.status(400).json({ message: "Choose a report period of today, 7, 30, or 90 days." });
+    }
+    const meter = await Meter.findOne({ meterId, userId: req.user._id }).lean();
+    if (!meter) return res.status(404).json({ message: "That meter is not assigned to your account." });
+    const eligibleAt = new Date(Date.now() - 60 * 1000);
+    const requestSlot = await User.findOneAndUpdate({
+      _id: req.user._id,
+      $or: [
+        { reportRequestSentAt: null },
+        { reportRequestSentAt: { $lte: eligibleAt } }
+      ]
+    }, { $set: { reportRequestSentAt: new Date() } }, { new: true });
+    if (!requestSlot) return res.status(429).json({ message: "Please wait one minute before requesting another report." });
+
+    const title = days === 1 ? "Today's energy report" : `Last ${days} days energy report`;
+    try {
+      await sendEnergyReport(req.user, [meter], days, title);
+    } catch (error) {
+      console.error("User energy report delivery failed:", error.message);
+      return res.status(502).json({ message: "Could not deliver your report. Check the mail configuration or try again shortly." });
+    }
+    res.json({ message: `Your ${days === 1 ? "daily" : `${days}-day`} energy report was sent to ${req.user.email}.` });
+  } catch (error) {
+    console.error("User energy report request failed:", error);
+    res.status(500).json({ message: "Could not prepare the energy report." });
+  }
 });
 
 // ---------- Consumption / charts ----------
@@ -1051,6 +1220,66 @@ app.post("/api/admin/smtp/test", auth, adminOnly, async (req, res) => {
   }
 });
 
+app.get("/api/admin/report-settings", auth, adminOnly, async (req, res) => {
+  const settings = await ReportSettings.findOneAndUpdate(
+    { key: "default" },
+    { $setOnInsert: { key: "default" } },
+    { new: true, upsert: true, setDefaultsOnInsert: true }
+  ).lean();
+  const nextRun = [settings.dailyEnabled, settings.weeklyEnabled, settings.monthlyEnabled].some(Boolean)
+    ? `${String(settings.sendHour).padStart(2, "0")}:00`
+    : null;
+  res.json({
+    dailyEnabled: settings.dailyEnabled,
+    weeklyEnabled: settings.weeklyEnabled,
+    monthlyEnabled: settings.monthlyEnabled,
+    sendHour: settings.sendHour,
+    nextRun
+  });
+});
+
+app.put("/api/admin/report-settings", auth, adminOnly, async (req, res) => {
+  const { dailyEnabled, weeklyEnabled, monthlyEnabled } = req.body;
+  const sendHour = Number(req.body.sendHour);
+  if (![dailyEnabled, weeklyEnabled, monthlyEnabled].every(value => typeof value === "boolean")) {
+    return res.status(400).json({ message: "Choose whether each daily, weekly, and monthly report is enabled." });
+  }
+  if (!Number.isInteger(sendHour) || sendHour < 0 || sendHour > 23) {
+    return res.status(400).json({ message: "Choose a valid delivery hour in India Standard Time." });
+  }
+  if (dailyEnabled || weeklyEnabled || monthlyEnabled) {
+    try {
+      const smtp = await getSmtpConfig();
+      if (!smtp.host || !smtp.username || !smtp.password) {
+        return res.status(400).json({ message: "Configure SMTP and send a successful test email before enabling scheduled reports." });
+      }
+    } catch (error) {
+      console.error("Could not validate SMTP before enabling reports:", error.message);
+      return res.status(503).json({ message: "Could not validate SMTP credentials. Check the mail settings and SMTP_CONFIG_KEY." });
+    }
+  }
+  const settings = await ReportSettings.findOneAndUpdate(
+    { key: "default" },
+    {
+      $set: { dailyEnabled, weeklyEnabled, monthlyEnabled, sendHour },
+      $setOnInsert: { key: "default" }
+    },
+    { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true }
+  );
+  const anyEnabled = dailyEnabled || weeklyEnabled || monthlyEnabled;
+  res.json({
+    message: anyEnabled
+      ? `Report schedule saved. Enabled reports will be sent at ${String(sendHour).padStart(2, "0")}:00 India Standard Time.`
+      : "Report schedule saved. Automatic reports are currently disabled.",
+    settings: {
+      dailyEnabled: settings.dailyEnabled,
+      weeklyEnabled: settings.weeklyEnabled,
+      monthlyEnabled: settings.monthlyEnabled,
+      sendHour: settings.sendHour
+    }
+  });
+});
+
 app.get("/api/admin/settings", auth, adminOnly, async (req, res) => {
   const settings = await BillingSettings.findOneAndUpdate(
     { key: "default" },
@@ -1147,8 +1376,71 @@ app.get("*", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
+let scheduledReportCheckRunning = false;
+async function checkScheduledReports() {
+  if (scheduledReportCheckRunning) return;
+  scheduledReportCheckRunning = true;
+  try {
+    const now = new Date();
+    const istHour = Number(new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Kolkata", hour: "2-digit", hourCycle: "h23"
+    }).format(now));
+    const todayStart = indiaStart(now);
+    const todayKey = todayStart.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+    const weekday = new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Kolkata", weekday: "short" }).format(now);
+    const weekdayIndex = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(weekday);
+    const dayOfMonth = Number(new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Kolkata", day: "2-digit"
+    }).format(now));
+    const settings = await ReportSettings.findOne({ key: "default" });
+    if (!settings || istHour < settings.sendHour) return;
+
+    const due = [];
+    if (settings.dailyEnabled) {
+      due.push({ enabled: true, field: "lastDailyKey", key: todayKey, days: 1, end: todayStart, title: "Daily energy report" });
+    }
+    if (settings.weeklyEnabled && weekdayIndex === 1) {
+      const weekEnd = todayStart;
+      const weekKey = addIndiaDays(weekEnd, -7).toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+      due.push({ enabled: true, field: "lastWeeklyKey", key: weekKey, days: 7, end: weekEnd, title: "Weekly energy report" });
+    }
+    if (settings.monthlyEnabled && dayOfMonth === 1) {
+      const monthEnd = todayStart;
+      const previousMonthStart = indiaMonthStart(now, 1, -1);
+      const monthDays = Math.round((monthEnd.getTime() - previousMonthStart.getTime()) / 86400000);
+      const monthKey = previousMonthStart.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }).slice(0, 7);
+      due.push({ enabled: true, field: "lastMonthlyKey", key: monthKey, days: monthDays, end: monthEnd, title: "Monthly energy report" });
+    }
+    for (const report of due) {
+      const claimed = await ReportSettings.findOneAndUpdate(
+        { _id: settings._id, [report.field]: { $ne: report.key } },
+        { $set: { [report.field]: report.key } },
+        { new: true }
+      );
+      if (!claimed) continue;
+      const recipients = await User.find({ role: "User", active: true }).select("name email").lean();
+      for (const recipient of recipients) {
+        const assignedMeters = await Meter.find({ userId: recipient._id }).lean();
+        if (!assignedMeters.length) continue;
+        try {
+          await sendEnergyReport(recipient, assignedMeters, report.days, report.title, report.end);
+        } catch (error) {
+          console.error(`Scheduled ${report.title.toLowerCase()} delivery failed for ${recipient.email}:`, error.message);
+        }
+      }
+    }
+  } catch (error) {
+    console.error("Scheduled energy report check failed:", error);
+  } finally {
+    scheduledReportCheckRunning = false;
+  }
+}
+
 connectDB().then(() => {
-  app.listen(PORT, "0.0.0.0", () => console.log(`Energy Meter Server running on port ${PORT}`));
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Energy Meter Server running on port ${PORT}`);
+    setInterval(checkScheduledReports, 60000);
+  });
 }).catch(err => {
   console.error("MongoDB connection failed:", err);
   process.exit(1);

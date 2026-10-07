@@ -192,8 +192,6 @@ function renderAnalytics(data) {
   renderChart("dailyChart", "line", data.daily.map(row => row.date), data.daily.map(row => row.kwh), "kWh");
   renderChart("monthlyChart", "bar", data.monthly.map(row => row.month), data.monthly.map(row => row.kwh), "kWh");
   renderChart("weeklyChart", "bar", data.weekly.map(row => row.date), data.weekly.map(row => row.kwh), "kWh");
-  $("consTable").innerHTML = data.table.map(row => `<tr><td>${esc(row.date)}</td><td>${display(row.kwh, "", 4)}</td><td>${money(row.bill?.cost)}</td><td>${row.samples}</td></tr>`).join("")
-    || `<tr><td colspan="4">No readings available for this period.</td></tr>`;
 }
 
 function renderAlerts(alerts, meterId) {
@@ -213,6 +211,27 @@ function renderAlerts(alerts, meterId) {
 }
 
 $("closeAlert").addEventListener("click", () => $("alertDialog").close());
+
+$("reportRequestForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const button = $("requestReportButton");
+  const message = $("reportRequestMessage");
+  button.disabled = true;
+  message.textContent = "Preparing your report from meter readings…";
+  try {
+    const result = await API.request("/api/user/reports/request", {
+      method: "POST",
+      body: { meterId: $("meterSelect").value, days: Number($("reportRange").value) }
+    });
+    message.textContent = result.message;
+    toast("Energy report sent");
+  } catch (error) {
+    message.textContent = error.message;
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
 
 $("changePasswordForm").addEventListener("submit", async event => {
   event.preventDefault();

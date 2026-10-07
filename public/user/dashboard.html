@@ -20,6 +20,7 @@
     <nav class="user-nav" aria-label="User dashboard sections">
       <button class="user-navbtn active" data-tab="overview">Overview</button>
       <button class="user-navbtn" data-tab="analytics">Usage analytics</button>
+      <button class="user-navbtn" data-tab="reports">Email reports</button>
       <button class="user-navbtn" data-tab="insights">Saving & alerts</button>
       <button class="user-navbtn" data-tab="account">Account & password</button>
     </nav>
@@ -89,9 +90,17 @@
         <div class="panel"><b>Monthly usage (kWh)</b><div class="chart-box"><canvas id="monthlyChart"></canvas></div></div>
         <div class="panel"><b>Weekly usage (kWh)</b><div class="chart-box"><canvas id="weeklyChart"></canvas></div></div>
       </div>
-      <div class="panel">
-        <div class="toolbar"><b>Usage history for selected period</b></div>
-        <div class="table-wrap"><table class="table"><thead><tr><th>Date</th><th>kWh</th><th>Estimated cost</th><th>Samples</th></tr></thead><tbody id="consTable"></tbody></table></div>
+    </section>
+
+    <section id="reports" class="user-section" aria-label="Email energy reports">
+      <h2 class="section-title">Get an energy report by email</h2>
+      <div class="panel report-request-panel">
+        <p class="muted">Request a polished report for this meter. It includes real measured usage, estimated cost, trend charts, billing details, device status, and any active alerts. Missing readings are clearly marked unavailable.</p>
+        <form id="reportRequestForm" class="report-request-form">
+          <div class="field"><label for="reportRange">Report period</label><select id="reportRange"><option value="1">Today</option><option value="7" selected>Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option></select></div>
+          <button id="requestReportButton" class="btn" type="submit">Email report to my account</button>
+        </form>
+        <p id="reportRequestMessage" class="status-text" role="status" aria-live="polite"></p>
       </div>
     </section>
 

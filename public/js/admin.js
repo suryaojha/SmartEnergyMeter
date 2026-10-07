@@ -10,6 +10,7 @@ document.querySelectorAll(".navbtn").forEach(button => {
     if (button.dataset.tab === "consumption") loadConsumption();
     if (button.dataset.tab === "wifi") loadWifiStatus();
     if (button.dataset.tab === "smtp") loadSmtpSettings();
+    if (button.dataset.tab === "reports") loadReportSettings();
   };
 });
 
@@ -17,7 +18,8 @@ document.querySelectorAll(".navbtn").forEach(button => {
   currentUser = await requireRole("Admin");
   if (!currentUser) return;
   $("adminName").textContent = currentUser.name;
-  await Promise.all([loadOverview(), loadMeters(), loadUsers(), loadTariffs(), loadSettings()]);
+  fillReportHours();
+  await Promise.all([loadOverview(), loadMeters(), loadUsers(), loadTariffs(), loadSettings(), loadReportSettings()]);
   setInterval(loadOverview, 5000);
   setInterval(() => {
     if ($("wifi").classList.contains("active")) loadWifiStatus();
@@ -83,7 +85,7 @@ async function loadMeters() {
       const frequencies = [1, 2, 5, 10, 30, 60, 300];
       if (!frequencies.includes(freq)) frequencies.push(freq);
       return `<tr>
-        <td><b>${esc(meter.meterId)}</b><input class="meter-name-input" value="${esc(meter.meterName || "")}" placeholder="Meter name" data-meter-name="${esc(meter.meterId)}" aria-label="Meter name"></td>
+        <td><b>${esc(meter.meterId)}</b><div class="status-text">${esc(meter.meterName || "Unnamed meter")}</div></td>
         <td><span class="pill ${meter.online ? "online" : "offline"}">${meter.online ? "ONLINE" : "OFFLINE"}</span><div class="status-text">${meter.online ? `Online ${duration(meter.uptimeSeconds)}` : "Offline"}<br>${meter.lastSeen ? esc(new Date(meter.lastSeen).toLocaleString()) : "No data received"}</div></td>
         <td>${esc(meter.status || "--")} <small>(${esc(meter.command || "--")})</small></td>
         <td>${esc(meter.userId?.name || "Unassigned")}</td>
@@ -110,7 +112,6 @@ $("meterTable").addEventListener("change", event => {
   const target = event.target;
   if (target.dataset.frequency) setFreq(target.dataset.frequency, target.value);
   if (target.dataset.assignment) assignMeter(target.dataset.assignment, target.value);
-  if (target.dataset.meterName) saveMeterName(target.dataset.meterName, target.value);
 });
 $("meterTable").addEventListener("click", event => {
   const button = event.target.closest("[data-command]");
@@ -145,16 +146,6 @@ $("copyDeviceToken").addEventListener("click", async () => {
     toast("Select and copy the token manually");
   }
 });
-
-async function saveMeterName(id, meterName) {
-  try {
-    await API.request(`/api/admin/meters/${encodeURIComponent(id)}/config`, { method: "PUT", body: { meterName } });
-    toast("Meter name saved");
-    await loadMeters();
-  } catch (e) {
-    toast(e.message);
-  }
-}
 
 async function setCommand(id, command) {
   try {
@@ -352,8 +343,6 @@ async function loadConsumption() {
     renderChart("dailyChart", "line", data.daily.map(row => row.date), data.daily.map(row => row.kwh));
     renderChart("monthlyChart", "bar", data.monthly.map(row => row.month), data.monthly.map(row => row.kwh));
     renderChart("weeklyChart", "bar", data.weekly.map(row => row.date), data.weekly.map(row => row.kwh));
-    $("consTable").innerHTML = data.table.map(row => `<tr><td>${esc(row.date)}</td><td>${display(row.kwh, "", 4)}</td><td>${money(row.bill?.cost)}</td><td>${row.samples}</td></tr>`).join("")
-      || `<tr><td colspan="4">No readings available for this period.</td></tr>`;
   } catch (e) {
     toast(e.message);
   }
@@ -451,6 +440,52 @@ $("settingsForm").onsubmit = async event => {
     toast(e.message);
   }
 };
+
+function fillReportHours() {
+  $("reportSendHour").innerHTML = Array.from({ length: 24 }, (_, hour) =>
+    `<option value="${hour}">${String(hour).padStart(2, "0")}:00</option>`
+  ).join("");
+}
+
+async function loadReportSettings() {
+  try {
+    const settings = await API.request("/api/admin/report-settings");
+    $("dailyReportEnabled").checked = settings.dailyEnabled;
+    $("weeklyReportEnabled").checked = settings.weeklyEnabled;
+    $("monthlyReportEnabled").checked = settings.monthlyEnabled;
+    $("reportSendHour").value = String(settings.sendHour);
+    $("reportSettingsMessage").textContent = settings.nextRun
+      ? `Schedules are saved. Reports run at ${settings.nextRun} India Standard Time on their selected cadence.`
+      : "No report schedule is enabled.";
+  } catch (error) {
+    $("reportSettingsMessage").textContent = error.message;
+  }
+}
+
+$("reportSettingsForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const button = $("reportSettingsForm").querySelector('button[type="submit"]');
+  button.disabled = true;
+  $("reportSettingsMessage").textContent = "Saving report schedule…";
+  try {
+    const result = await API.request("/api/admin/report-settings", {
+      method: "PUT",
+      body: {
+        dailyEnabled: $("dailyReportEnabled").checked,
+        weeklyEnabled: $("weeklyReportEnabled").checked,
+        monthlyEnabled: $("monthlyReportEnabled").checked,
+        sendHour: Number($("reportSendHour").value)
+      }
+    });
+    $("reportSettingsMessage").textContent = result.message;
+    toast(result.message);
+  } catch (error) {
+    $("reportSettingsMessage").textContent = error.message;
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
 
 async function loadSmtpSettings() {
   try {

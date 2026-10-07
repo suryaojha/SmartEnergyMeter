@@ -27,10 +27,13 @@ SMTP settings saved from the admin panel are encrypted with AES-256-GCM and stor
 - Responsive user and admin dashboards.
 - Six-digit, expiring password reset codes delivered by SMTP; authenticated accounts can change their password from the separate account section.
 - Administrator-managed SMTP settings and test email delivery; SMTP passwords are write-only in the UI and encrypted in MongoDB.
+- Admin-configurable daily, weekly, and monthly scheduled email reports for assigned meters, plus user-requested 1-, 7-, 30-, or 90-day reports. Emails include real-reading usage/cost trends, tariff estimates, live technical values, and active alerts; missing data remains unavailable.
 - User alert pop-ups, online-duration reporting, and graph windows for 24 hours, 7 days, 30 days, and 90 days.
 - Admin Wi-Fi scan/connect requests for paired ESP32 devices. Wi-Fi passwords are AES-GCM encrypted at rest and only sent to the paired device when it requests settings.
 
 Costs are estimates, not a replacement for the utility's bill. The estimate uses the configured slabs and charges; configure these to match the applicable tariff.
+
+Scheduled reports use India Standard Time and are delivered to each active user's registered email address when that user has an assigned meter. Configure the schedule under **Email reports** and save SMTP credentials under **Mail delivery**. The scheduler checks once per minute while the server is running; it sends each scheduled period at most once, even after a restart. Users can request an immediate report from their dashboard.
 
 ## ESP32 assumptions
 
