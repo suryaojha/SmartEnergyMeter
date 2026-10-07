@@ -6,7 +6,12 @@ async function auth(req, res, next) {
     const header = req.headers.authorization || "";
     if (!header.startsWith("Bearer ")) return res.status(401).json({ message: "Login required" });
     const token = header.slice(7);
-    const payload = jwt.verify(token, process.env.JWT_SECRET || "dev-secret");
+    const secret = process.env.JWT_SECRET;
+    if (!secret) {
+      console.error("JWT_SECRET is not configured");
+      return res.status(500).json({ message: "Authentication is not configured" });
+    }
+    const payload = jwt.verify(token, secret);
     const user = await User.findById(payload.id).select("-password");
     if (!user || !user.active) return res.status(401).json({ message: "Account inactive or not found" });
     req.user = user;
