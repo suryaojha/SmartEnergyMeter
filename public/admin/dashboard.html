@@ -16,10 +16,12 @@
     <aside class="sidebar">
       <button class="navbtn active" data-tab="overview">Dashboard</button>
       <button class="navbtn" data-tab="meters">Meters & Control</button>
+      <button class="navbtn" data-tab="wifi">ESP32 Wi-Fi</button>
       <button class="navbtn" data-tab="consumption">Consumption</button>
       <button class="navbtn" data-tab="users">Users</button>
       <button class="navbtn" data-tab="tariffs">Tariff slabs</button>
       <button class="navbtn" data-tab="settings">Billing & alerts</button>
+      <button class="navbtn" data-tab="smtp">Mail delivery</button>
     </aside>
     <main class="main">
       <section id="overview" class="section active">
@@ -47,8 +49,30 @@
         </div>
         <div class="panel" style="margin-top:16px">
           <div class="toolbar"><b>Registered meters</b><button class="btn small" onclick="loadMeters()">Refresh</button></div>
-          <div class="table-wrap"><table class="table"><thead><tr><th>ID / name</th><th>Connection</th><th>Relay</th><th>Assigned user</th><th>Interval</th><th>Control</th><th>Assignment</th></tr></thead><tbody id="meterTable"></tbody></table></div>
+          <div class="table-wrap"><table class="table"><thead><tr><th>ID / name</th><th>Connection</th><th>Relay</th><th>Assigned user</th><th>Interval</th><th>Control</th><th>Assignment</th><th>Device token</th></tr></thead><tbody id="meterTable"></tbody></table></div>
         </div>
+      </section>
+
+      <section id="wifi" class="section">
+        <h1 class="page-title">ESP32 Wi-Fi setup</h1>
+        <p class="muted">Ask a paired, online ESP32 to scan nearby networks, choose an SSID, and queue the connection. The Wi-Fi password is encrypted before it is saved in MongoDB.</p>
+        <div class="panel">
+          <div class="form-row">
+            <div class="field"><label for="wifiMeter">Meter</label><select id="wifiMeter"></select></div>
+            <div class="field"><label>Device connection</label><div id="wifiStatus" class="status-text">Select a meter.</div></div>
+            <div class="field"><label for="wifiScan">Network scan</label><button id="wifiScan" class="btn secondary" type="button">Scan nearby networks</button></div>
+          </div>
+          <p id="wifiMessage" class="status-text" role="status"></p>
+        </div>
+        <form id="wifiConnectForm" class="panel" style="margin-top:16px">
+          <h2 class="section-title">Choose a network</h2>
+          <div class="form-row">
+            <div class="field"><label for="wifiNetworks">Nearby Wi-Fi network</label><select id="wifiNetworks" required><option value="">Scan for networks first</option></select></div>
+            <div class="field"><label for="wifiPassword">Wi-Fi password</label><input id="wifiPassword" type="password" autocomplete="new-password" maxlength="63"></div>
+            <div class="field"><label>Save and connect</label><button id="wifiConnect" class="btn" type="submit">Save in database & connect</button></div>
+          </div>
+          <p class="status-text">Only SSIDs reported by this meter's scan can be selected. New firmware and a paired device token are required.</p>
+        </form>
       </section>
 
       <section id="consumption" class="section">
@@ -132,8 +156,34 @@
           <button class="btn" type="submit">Save billing & alert settings</button><p id="settingsMsg" class="status-text"></p>
         </form>
       </section>
+
+      <section id="smtp" class="section">
+        <h1 class="page-title">Mail delivery</h1>
+        <p class="muted">Configure the SMTP account used for six-digit password recovery emails. Credentials are encrypted before they are stored in MongoDB.</p>
+        <form id="smtpForm" class="panel smtp-panel">
+          <div class="smtp-status"><div><h2 class="section-title">SMTP account</h2><p id="smtpStatus" class="status-text" role="status">Loading mail settings…</p></div><span id="smtpConfigured" class="pill offline">NOT CONFIGURED</span></div>
+          <div class="form-row smtp-fields">
+            <div class="field"><label for="smtpHost">SMTP host</label><input id="smtpHost" name="host" required maxlength="255" placeholder="smtp.gmail.com" autocomplete="url"></div>
+            <div class="field"><label for="smtpPort">SMTP port</label><input id="smtpPort" name="port" type="number" min="1" max="65535" value="587" required></div>
+            <div class="field"><label for="smtpUsername">SMTP username</label><input id="smtpUsername" name="username" type="email" required maxlength="254" autocomplete="username"></div>
+            <div class="field"><label for="smtpAppPassword">SMTP app password</label><input id="smtpAppPassword" name="appPassword" type="password" maxlength="256" autocomplete="new-password" placeholder="Enter to replace; blank keeps current"></div>
+          </div>
+          <p class="smtp-hint">For Gmail, enable 2-Step Verification and create an app password. Paste it here; spaces are removed. The password is never shown again after saving. Mail is sent from the configured SMTP account to each user's registered email. For security, use a dedicated app password and rotate any credential previously shared in chat.</p>
+          <div class="actions smtp-actions">
+            <button class="btn" type="submit">Save mail settings</button>
+            <button id="smtpTestButton" class="btn secondary" type="button" disabled>Send test email to my admin account</button>
+          </div>
+          <p id="smtpMessage" class="status-text" role="status" aria-live="polite"></p>
+        </form>
+      </section>
     </main>
   </div>
+  <dialog id="deviceTokenDialog" class="token-dialog">
+    <div class="dialog-head"><h2>ESP32 device token</h2><button id="closeDeviceToken" class="btn small secondary" type="button">Close</button></div>
+    <p class="muted">Copy this token into the ESP32 setup portal now. It is shown only once; rotating it invalidates the previous token.</p>
+    <div class="field"><label for="deviceTokenValue">One-time device token</label><input id="deviceTokenValue" readonly></div>
+    <button id="copyDeviceToken" class="btn" type="button" style="margin-top:12px">Copy token</button>
+  </dialog>
   <div id="toast" class="toast"></div>
   <script src="/js/common.js"></script>
   <script src="/js/admin.js"></script>

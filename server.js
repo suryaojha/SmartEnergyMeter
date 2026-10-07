@@ -13,6 +13,8 @@ const Meter = require("./models/Meter");
 const Reading = require("./models/Reading");
 const TariffSlab = require("./models/TariffSlab");
 const BillingSettings = require("./models/BillingSettings");
+const WifiProvisioning = require("./models/WifiProvisioning");
+const SmtpSettings = require("./models/SmtpSettings");
 const { auth, adminOnly } = require("./middleware/auth");
 
 const app = express();
@@ -36,9 +38,18 @@ function online(meter) {
 
 function publicMeter(m) {
   const x = m.toObject ? m.toObject() : m;
-  return { ...x, online: online(x), user: x.userId?.name ? {
+  const devicePaired = Boolean(x.deviceTokenHash);
+  delete x.deviceTokenHash;
+  const isOnline = online(x);
+  const lastOnlineAt = x.lastSeen ? new Date(x.lastSeen) : null;
+  const onlineSince = x.onlineSince ? new Date(x.onlineSince) : null;
+  return { ...x, online: isOnline, devicePaired, user: x.userId?.name ? {
     _id: x.userId._id, name: x.userId.name, email: x.userId.email
-  } : null };
+  } : null,
+  uptimeSeconds: lastOnlineAt && onlineSince
+    ? Math.max(0, Math.floor(((isOnline ? Date.now() : lastOnlineAt.getTime()) - onlineSince.getTime()) / 1000))
+    : null
+  };
 }
 
 function indiaStart(date = new Date()) {
@@ -184,31 +195,123 @@ function liveHourlyCost(power, cumulativeKwh, slabs, settings) {
   return Number((energyCharge + fac + wheeling + duty).toFixed(2));
 }
 
-async function sendResetEmail(user, resetLink) {
-  const host = process.env.SMTP_HOST;
-  if (!host) return false;
-  const transporter = nodemailer.createTransport({
-    host,
-    port: Number(process.env.SMTP_PORT || 587),
-    secure: Number(process.env.SMTP_PORT || 587) === 465,
-    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
-  });
+async function sendResetEmail(user, code) {
+  const config = await getSmtpConfig();
+  if (!config.host || !config.username || !config.password) throw new Error("SMTP is not configured. Ask an administrator to configure email settings.");
+  const transporter = createSmtpTransport(config);
+  const name = String(user.name || "there").replace(/[&<>"']/g, character => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
+  })[character]);
   await transporter.sendMail({
-    from: process.env.SMTP_FROM || "Energy Meter <no-reply@example.com>",
+    from: config.from,
     to: user.email,
-    subject: "Energy Meter password reset",
-    text: `Reset your password: ${resetLink}\nThis link expires in 15 minutes.`
+    subject: "Your Smart Energy Meter password reset code",
+    text: `Hello ${user.name || "there"},\n\nUse this six-digit code to reset your Smart Energy Meter password:\n\n${code}\n\nThis code expires in 10 minutes and can be used only once. If you did not request a password reset, you can ignore this email.`,
+    html: `<div style="margin:0;padding:32px 16px;background:#f1f5f9;font-family:Arial,sans-serif;color:#172033"><div style="max-width:520px;margin:0 auto;padding:32px;background:#ffffff;border:1px solid #e2e8f0;border-radius:16px"><p style="margin:0 0 8px;color:#2563eb;font-weight:700">SMART ENERGY METER</p><h1 style="margin:0 0 16px;font-size:24px">Reset your password</h1><p style="line-height:1.6">Hello ${name}, use this six-digit verification code to set a new password:</p><div style="margin:24px 0;padding:16px;text-align:center;background:#eff6ff;border-radius:12px;color:#1d4ed8;font-size:32px;font-weight:800;letter-spacing:10px">${code}</div><p style="line-height:1.6">This code expires in <strong>10 minutes</strong> and can be used only once.</p><p style="line-height:1.6;color:#64748b;font-size:13px">If you did not request a password reset, ignore this email. Your password will not change unless this code is submitted on the reset page.</p></div></div>`
   });
   return true;
+}
+
+function smtpEncryptionKey() {
+  const configured = process.env.SMTP_CONFIG_KEY;
+  if (!configured || configured.length < 32) {
+    throw new Error("SMTP_CONFIG_KEY must be set to at least 32 characters before saving mail settings.");
+  }
+  return crypto.scryptSync(configured, "smart-energy-meter-smtp-v1", 32);
+}
+
+function encryptSmtpPassword(password) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", smtpEncryptionKey(), iv);
+  const ciphertext = Buffer.concat([cipher.update(password, "utf8"), cipher.final()]);
+  return { passwordCiphertext: ciphertext.toString("hex"), passwordIv: iv.toString("hex"), passwordTag: cipher.getAuthTag().toString("hex") };
+}
+
+function decryptSmtpPassword(settings) {
+  const decipher = crypto.createDecipheriv("aes-256-gcm", smtpEncryptionKey(), Buffer.from(settings.passwordIv, "hex"));
+  decipher.setAuthTag(Buffer.from(settings.passwordTag, "hex"));
+  return Buffer.concat([
+    decipher.update(Buffer.from(settings.passwordCiphertext, "hex")),
+    decipher.final()
+  ]).toString("utf8");
+}
+
+async function getSmtpConfig() {
+  const saved = await SmtpSettings.findOne({ key: "default" }).lean();
+  return {
+    host: saved?.host || process.env.SMTP_HOST || "",
+    port: Number(saved?.port || process.env.SMTP_PORT || 587),
+    username: saved?.username || process.env.SMTP_USER || "",
+    from: `Smart Energy Meter <${saved?.username || process.env.SMTP_USER || ""}>`,
+    password: saved?.passwordCiphertext ? decryptSmtpPassword(saved) : process.env.SMTP_PASS || "",
+    lastTestedAt: saved?.lastTestedAt || null,
+    source: saved ? "database" : "environment"
+  };
+}
+
+function createSmtpTransport(config) {
+  return nodemailer.createTransport({
+    host: config.host,
+    port: config.port,
+    secure: config.port === 465,
+    auth: { user: config.username, pass: config.password }
+  });
+}
+
+function wifiEncryptionKey() {
+  const configured = process.env.WIFI_CONFIG_KEY;
+  if (!configured || configured.length < 32) {
+    throw new Error("WIFI_CONFIG_KEY must be set to at least 32 characters before saving Wi-Fi credentials.");
+  }
+  return crypto.scryptSync(configured, "smart-energy-meter-wifi-v1", 32);
+}
+
+function encryptWifiPassword(password) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", wifiEncryptionKey(), iv);
+  const ciphertext = Buffer.concat([cipher.update(password, "utf8"), cipher.final()]);
+  return { passwordCiphertext: ciphertext.toString("hex"), passwordIv: iv.toString("hex"), passwordTag: cipher.getAuthTag().toString("hex") };
+}
+
+function decryptWifiPassword(provision) {
+  const decipher = crypto.createDecipheriv(
+    "aes-256-gcm",
+    wifiEncryptionKey(),
+    Buffer.from(provision.passwordIv, "hex")
+  );
+  decipher.setAuthTag(Buffer.from(provision.passwordTag, "hex"));
+  return Buffer.concat([
+    decipher.update(Buffer.from(provision.passwordCiphertext, "hex")),
+    decipher.final()
+  ]).toString("utf8");
+}
+
+async function deviceAuth(req, res, next) {
+  try {
+    const meterId = String(req.params.meterId || req.body.meterId || "").toUpperCase();
+    const header = req.headers.authorization || "";
+    if (!header.startsWith("Bearer ")) return res.status(401).json({ message: "Device token required" });
+    const supplied = crypto.createHash("sha256").update(header.slice(7)).digest();
+    const meter = await Meter.findOne({ meterId }).select("+deviceTokenHash");
+    if (!meter?.deviceTokenHash) return res.status(401).json({ message: "Device is not paired; ask the administrator to issue a device token" });
+    const expected = Buffer.from(meter.deviceTokenHash, "hex");
+    if (expected.length !== supplied.length || !crypto.timingSafeEqual(expected, supplied)) {
+      return res.status(401).json({ message: "Invalid device token" });
+    }
+    req.deviceMeter = meter;
+    next();
+  } catch (error) {
+    next(error);
+  }
 }
 
 // ---------- Health ----------
 app.get("/api/health", (req, res) => res.json({ ok: true, time: new Date() }));
 
-// ---------- ESP32 public device APIs ----------
-app.post("/api/meter/data", async (req, res) => {
+// ---------- Paired ESP32 device APIs ----------
+app.post("/api/meter/data", deviceAuth, async (req, res) => {
   try {
-    const { meterId, status = "OFF" } = req.body;
+    const { meterId, status = null } = req.body;
     if (typeof meterId !== "string" || !/^[A-Za-z0-9_-]{1,40}$/.test(meterId)) {
       return res.status(400).json({ message: "meterId must contain 1 to 40 letters, numbers, underscores or hyphens" });
     }
@@ -224,16 +327,19 @@ app.post("/api/meter/data", async (req, res) => {
         return res.status(400).json({ message: `${field} must be a finite number or null` });
       }
     }
-    if (!["ON", "OFF"].includes(status)) return res.status(400).json({ message: "status must be ON or OFF" });
+    if (status !== null && !["ON", "OFF"].includes(status)) return res.status(400).json({ message: "status must be ON, OFF, or null" });
 
     const id = String(meterId).toUpperCase();
+    if (id !== req.deviceMeter.meterId) return res.status(403).json({ message: "Meter ID does not match paired device" });
+    const now = new Date();
     const meter = await Meter.findOneAndUpdate(
       { meterId: id },
       {
         $set: {
           ...readings,
           status,
-          lastSeen: new Date()
+          lastSeen: now,
+          onlineSince: online(req.deviceMeter) ? req.deviceMeter.onlineSince : now
         }
       },
       { new: true }
@@ -257,16 +363,63 @@ app.post("/api/meter/data", async (req, res) => {
   }
 });
 
-app.get("/api/meter/:meterId/command", async (req, res) => {
-  const meter = await Meter.findOne({ meterId: req.params.meterId.toUpperCase() }).lean();
-  if (!meter) return res.status(404).json({ message: "Meter not registered" });
-  res.json({ command: meter.command });
+app.get("/api/device/:meterId/settings", deviceAuth, async (req, res) => {
+  const provision = await WifiProvisioning.findOne({ meterId: req.deviceMeter.meterId }).lean();
+  let wifiConfig = null;
+  if (provision?.status === "pending" && provision.passwordCiphertext) {
+    wifiConfig = {
+      revision: provision.revision,
+      ssid: provision.selectedSsid,
+      password: decryptWifiPassword(provision)
+    };
+  }
+  res.json({
+    updateFrequency: req.deviceMeter.updateFrequency,
+    command: req.deviceMeter.command,
+    wifiScanRequested: provision?.scanRequested || false,
+    wifiConfig
+  });
 });
 
-app.get("/api/meter/:meterId/settings", async (req, res) => {
-  const meter = await Meter.findOne({ meterId: req.params.meterId.toUpperCase() }).lean();
-  if (!meter) return res.status(404).json({ message: "Meter not registered" });
-  res.json({ updateFrequency: meter.updateFrequency, command: meter.command });
+app.post("/api/device/:meterId/wifi-scan", deviceAuth, async (req, res) => {
+  const networks = req.body.networks;
+  if (!Array.isArray(networks) || networks.length > 30) {
+    return res.status(400).json({ message: "Networks must be an array containing at most 30 entries" });
+  }
+  const cleaned = [];
+  for (const network of networks) {
+    if (typeof network?.ssid !== "string" || !network.ssid.trim() || network.ssid.length > 32 ||
+      !Number.isFinite(network.rssi) || network.rssi < -120 || network.rssi > 0) {
+      return res.status(400).json({ message: "Each network needs a valid SSID and signal strength" });
+    }
+    cleaned.push({ ssid: network.ssid, rssi: network.rssi, secure: network.secure !== false });
+  }
+  const provision = await WifiProvisioning.findOneAndUpdate(
+    { meterId: req.deviceMeter.meterId },
+    { $set: { networks: cleaned, scannedAt: new Date(), scanRequested: false, status: "scanned", error: "" } },
+    { new: true, upsert: true, setDefaultsOnInsert: true }
+  );
+  res.json({ ok: true, count: provision.networks.length });
+});
+
+app.post("/api/device/:meterId/wifi-status", deviceAuth, async (req, res) => {
+  const { revision, connected, ssid, error } = req.body;
+  if (!Number.isInteger(revision) || typeof connected !== "boolean") {
+    return res.status(400).json({ message: "Revision and connection status are required" });
+  }
+  const provision = await WifiProvisioning.findOne({ meterId: req.deviceMeter.meterId, revision });
+  if (!provision || provision.status !== "pending") return res.status(409).json({ message: "No matching pending Wi-Fi configuration" });
+  if (connected && ssid !== provision.selectedSsid) return res.status(400).json({ message: "Connected SSID does not match the pending configuration" });
+  provision.status = connected ? "connected" : "failed";
+  provision.error = connected ? "" : String(error || "ESP32 could not connect").slice(0, 160);
+  if (connected) {
+    provision.connectedAt = new Date();
+    provision.passwordCiphertext = null;
+    provision.passwordIv = null;
+    provision.passwordTag = null;
+  }
+  await provision.save();
+  res.json({ ok: true });
 });
 
 // ---------- Auth ----------
@@ -315,41 +468,94 @@ app.post("/api/auth/forgot-password", async (req, res) => {
   try {
     const email = String(req.body.email || "").toLowerCase().trim();
     const user = await User.findOne({ email });
-    if (!user) return res.json({ message: "If the account exists, a reset link has been prepared." });
-
-    const rawToken = crypto.randomBytes(32).toString("hex");
-    const hash = crypto.createHash("sha256").update(rawToken).digest("hex");
-    user.resetTokenHash = hash;
-    user.resetTokenExpiry = new Date(Date.now() + 15 * 60 * 1000);
-    await user.save();
-
-    const base = process.env.APP_URL || `http://localhost:${PORT}`;
-    const resetLink = `${base}/reset-password.html?token=${rawToken}`;
-    const emailed = await sendResetEmail(user, resetLink).catch(() => false);
-
-    const payload = { message: emailed ? "Reset link sent to your email." : "Reset link generated for local demo." };
-    if (!emailed) payload.resetLink = resetLink;
-    res.json(payload);
-  } catch {
-    res.status(500).json({ message: "Could not create reset link" });
+    if (user) {
+      if (user.resetCodeSentAt && Date.now() - user.resetCodeSentAt.getTime() < 60000) {
+        return res.json({ message: "If the account exists, a password reset code will arrive by email." });
+      }
+      const code = String(crypto.randomInt(100000, 1000000));
+      user.resetCodeHash = crypto.createHash("sha256").update(`${user._id}:${code}`).digest("hex");
+      user.resetCodeExpiry = new Date(Date.now() + 10 * 60 * 1000);
+      user.resetCodeSentAt = new Date();
+      user.resetCodeAttempts = 0;
+      await user.save();
+      try {
+        await sendResetEmail(user, code);
+      } catch (error) {
+        user.resetCodeHash = null;
+        user.resetCodeExpiry = null;
+        user.resetCodeSentAt = null;
+        user.resetCodeAttempts = 0;
+        await user.save();
+        console.error("Password reset email delivery failed:", error.message);
+        return res.status(503).json({ message: "Could not send the reset code. Check the SMTP configuration and try again." });
+      }
+    }
+    res.json({ message: "If the account exists, a password reset code will arrive by email." });
+  } catch (error) {
+    console.error("Password reset request failed:", error);
+    res.status(500).json({ message: "Could not create password reset code" });
   }
 });
 
 app.post("/api/auth/reset-password", async (req, res) => {
   try {
-    const { token, password } = req.body;
-    if (!token || !password || password.length < 6) return res.status(400).json({ message: "Valid token and 6+ character password required" });
-    const hash = crypto.createHash("sha256").update(token).digest("hex");
-    const user = await User.findOne({ resetTokenHash: hash, resetTokenExpiry: { $gt: new Date() } });
-    if (!user) return res.status(400).json({ message: "Reset link is invalid or expired" });
+    const email = String(req.body.email || "").toLowerCase().trim();
+    const code = String(req.body.code || "");
+    const password = String(req.body.password || "");
+    if (!email || !/^\d{6}$/.test(code) || password.length < 8) {
+      return res.status(400).json({ message: "Email, six-digit code, and a password of at least 8 characters are required" });
+    }
+    const user = await User.findOne({
+      email,
+      resetCodeExpiry: { $gt: new Date() },
+      resetCodeAttempts: { $lt: 5 }
+    });
+    const hash = user ? crypto.createHash("sha256").update(`${user._id}:${code}`).digest("hex") : "";
+    if (!user || !user.resetCodeHash || !crypto.timingSafeEqual(Buffer.from(user.resetCodeHash, "hex"), Buffer.from(hash, "hex"))) {
+      if (user) {
+        user.resetCodeAttempts += 1;
+        if (user.resetCodeAttempts >= 5) {
+          user.resetCodeHash = null;
+          user.resetCodeExpiry = null;
+        }
+        await user.save();
+      }
+      return res.status(400).json({ message: "Reset code is invalid or expired" });
+    }
 
     user.password = await bcrypt.hash(password, 10);
-    user.resetTokenHash = null;
-    user.resetTokenExpiry = null;
+    user.resetCodeHash = null;
+    user.resetCodeExpiry = null;
+    user.resetCodeSentAt = null;
+    user.resetCodeAttempts = 0;
     await user.save();
     res.json({ message: "Password reset successful. You can login now." });
-  } catch {
+  } catch (error) {
+    console.error("Password reset failed:", error);
     res.status(500).json({ message: "Password reset error" });
+  }
+});
+
+app.put("/api/auth/change-password", auth, async (req, res) => {
+  try {
+    const currentPassword = String(req.body.currentPassword || "");
+    const newPassword = String(req.body.newPassword || "");
+    if (!currentPassword || newPassword.length < 8) {
+      return res.status(400).json({ message: "Current password and a new password of at least 8 characters are required" });
+    }
+    const user = await User.findById(req.user._id);
+    if (!user || !(await bcrypt.compare(currentPassword, user.password))) {
+      return res.status(400).json({ message: "Current password is incorrect" });
+    }
+    if (await bcrypt.compare(newPassword, user.password)) {
+      return res.status(400).json({ message: "Choose a new password different from your current password" });
+    }
+    user.password = await bcrypt.hash(newPassword, 10);
+    await user.save();
+    res.json({ message: "Password changed successfully" });
+  } catch (error) {
+    console.error("Password change failed:", error);
+    res.status(500).json({ message: "Could not change password" });
   }
 });
 
@@ -397,7 +603,7 @@ app.delete("/api/admin/users/:id", auth, adminOnly, async (req, res) => {
 });
 
 app.get("/api/admin/meters", auth, adminOnly, async (req, res) => {
-  const meters = await Meter.find().populate("userId", "name email").sort({ meterId: 1 }).lean();
+  const meters = await Meter.find().select("+deviceTokenHash").populate("userId", "name email").sort({ meterId: 1 }).lean();
   res.json(meters.map(publicMeter));
 });
 
@@ -412,12 +618,85 @@ app.post("/api/admin/meters", auth, adminOnly, async (req, res) => {
   if (!Number.isInteger(frequency) || frequency < 1 || frequency > 3600) {
     return res.status(400).json({ message: "Frequency must be 1 to 3600 seconds" });
   }
+  const deviceToken = crypto.randomBytes(32).toString("hex");
   const meter = await Meter.create({
     meterId,
     meterName,
+    deviceTokenHash: crypto.createHash("sha256").update(deviceToken).digest("hex"),
     updateFrequency: frequency
   });
-  res.status(201).json({ message: "Meter created", meter: publicMeter(meter) });
+  res.status(201).json({ message: "Meter created. Save this one-time device token in the ESP32 setup portal.", meter: publicMeter(meter), deviceToken });
+});
+
+app.post("/api/admin/meters/:meterId/device-token", auth, adminOnly, async (req, res) => {
+  const deviceToken = crypto.randomBytes(32).toString("hex");
+  const meter = await Meter.findOneAndUpdate(
+    { meterId: req.params.meterId.toUpperCase() },
+    { deviceTokenHash: crypto.createHash("sha256").update(deviceToken).digest("hex") },
+    { new: true }
+  ).populate("userId", "name email");
+  if (!meter) return res.status(404).json({ message: "Meter not found" });
+  res.json({ message: "Save this one-time token in the ESP32 setup portal.", meter: publicMeter(meter), deviceToken });
+});
+
+app.get("/api/admin/meters/:meterId/wifi", auth, adminOnly, async (req, res) => {
+  const meter = await Meter.findOne({ meterId: req.params.meterId.toUpperCase() }).select("+deviceTokenHash").lean();
+  if (!meter) return res.status(404).json({ message: "Meter not found" });
+  const provision = await WifiProvisioning.findOne({ meterId: meter.meterId }).lean();
+  res.json({
+    meterId: meter.meterId,
+    paired: Boolean(meter.deviceTokenHash),
+    online: online(meter),
+    lastSeen: meter.lastSeen,
+    status: provision?.status || "unconfigured",
+    scanRequested: provision?.scanRequested || false,
+    networks: provision?.networks || [],
+    scannedAt: provision?.scannedAt || null,
+    selectedSsid: provision?.selectedSsid || "",
+    connectedAt: provision?.connectedAt || null,
+    error: provision?.error || ""
+  });
+});
+
+app.post("/api/admin/meters/:meterId/wifi/scan", auth, adminOnly, async (req, res) => {
+  const meterId = req.params.meterId.toUpperCase();
+  if (!await Meter.exists({ meterId })) return res.status(404).json({ message: "Meter not found" });
+  await WifiProvisioning.findOneAndUpdate(
+    { meterId },
+    { $set: { scanRequested: true, status: "scan-requested", error: "" } },
+    { new: true, upsert: true, setDefaultsOnInsert: true }
+  );
+  res.json({ message: "Wi-Fi scan queued. The paired ESP32 must be online to return nearby networks." });
+});
+
+app.post("/api/admin/meters/:meterId/wifi/connect", auth, adminOnly, async (req, res) => {
+  const meterId = req.params.meterId.toUpperCase();
+  if (!await Meter.exists({ meterId })) return res.status(404).json({ message: "Meter not found" });
+  const ssid = String(req.body.ssid || "");
+  const password = String(req.body.password || "");
+  if (!ssid || ssid.length > 32 || password.length > 63 || (password.length > 0 && password.length < 8)) {
+    return res.status(400).json({ message: "Choose a scanned network and provide a valid Wi-Fi password (8-63 characters, or blank for an open network)" });
+  }
+  const provision = await WifiProvisioning.findOne({ meterId });
+  if (!provision || !provision.networks.some(network => network.ssid === ssid)) {
+    return res.status(400).json({ message: "Select a network returned by the ESP32 scan first" });
+  }
+  let encrypted;
+  try {
+    encrypted = encryptWifiPassword(password);
+  } catch (error) {
+    return res.status(503).json({ message: error.message });
+  }
+  provision.selectedSsid = ssid;
+  provision.passwordCiphertext = encrypted.passwordCiphertext;
+  provision.passwordIv = encrypted.passwordIv;
+  provision.passwordTag = encrypted.passwordTag;
+  provision.revision += 1;
+  provision.status = "pending";
+  provision.error = "";
+  provision.connectedAt = null;
+  await provision.save();
+  res.json({ message: "Wi-Fi settings encrypted and saved to MongoDB. The ESP32 will apply them when it next checks in.", status: provision.status });
 });
 
 app.put("/api/admin/meters/:meterId/assign", auth, adminOnly, async (req, res) => {
@@ -486,8 +765,9 @@ app.get("/api/meters/:meterId/consumption", auth, async (req, res) => {
     return res.status(403).json({ message: "Meter not assigned to you" });
   }
 
-  const requestedDays = Number(req.query.days || 30);
-  const days = Number.isFinite(requestedDays) ? Math.max(7, Math.min(365, requestedDays)) : 30;
+  const range = String(req.query.range || `${req.query.days || 30}d`);
+  const requestedDays = range === "24h" ? 1 : Number.parseInt(range, 10);
+  const days = Number.isFinite(requestedDays) ? Math.max(1, Math.min(365, requestedDays)) : 30;
   const end = new Date();
   const start = new Date(end.getTime() - days * 86400000);
   const daily = await consumptionFor(meter.meterId, start, end);
@@ -545,10 +825,10 @@ app.get("/api/meters/:meterId/consumption", auth, async (req, res) => {
   const previousCalendarMonthBill = calculateBill(previousCalendarMonthKwh, slabs, settings);
 
   const hourlyRows = await Reading.aggregate([
-    { $match: { meterId: meter.meterId, energy: { $type: "number" }, createdAt: { $gte: currentDayStart, $lte: end } } },
+    { $match: { meterId: meter.meterId, energy: { $type: "number" }, createdAt: { $gte: start, $lte: end } } },
     { $sort: { createdAt: 1 } },
     { $group: {
-      _id: { $dateToString: { format: "%H", date: "$createdAt", timezone: "Asia/Kolkata" } },
+      _id: { $dateToString: { format: "%m-%d %H", date: "$createdAt", timezone: "Asia/Kolkata" } },
       firstEnergy: { $first: "$energy" },
       lastEnergy: { $last: "$energy" },
       maxEnergy: { $max: "$energy" },
@@ -671,6 +951,104 @@ app.get("/api/meters/:meterId/history", auth, async (req, res) => {
 
 app.get("/api/admin/tariffs", auth, adminOnly, async (req, res) => {
   res.json(await TariffSlab.find().sort({ minKwh: 1 }).lean());
+});
+
+app.get("/api/admin/smtp", auth, adminOnly, async (req, res) => {
+  try {
+    const config = await getSmtpConfig();
+    res.json({
+      host: config.host,
+      port: config.port,
+      username: config.username,
+      passwordConfigured: Boolean(config.password),
+      source: config.source,
+      lastTestedAt: config.lastTestedAt
+    });
+  } catch (error) {
+    console.error("Could not read SMTP settings:", error.message);
+    res.status(503).json({ message: "Could not read encrypted SMTP settings. Check SMTP_CONFIG_KEY." });
+  }
+});
+
+app.put("/api/admin/smtp", auth, adminOnly, async (req, res) => {
+  const host = String(req.body.host || "").trim();
+  const username = String(req.body.username || "").trim();
+  const port = Number(req.body.port);
+  const appPassword = String(req.body.appPassword || "").replace(/\s+/g, "");
+  if (!host || host.length > 255 || /[\r\n]/.test(host)) return res.status(400).json({ message: "Enter a valid SMTP server host" });
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return res.status(400).json({ message: "SMTP port must be between 1 and 65535" });
+  if (!username || username.length > 254 || /[\r\n]/.test(username)) return res.status(400).json({ message: "Enter a valid SMTP username, usually your full email address" });
+  if (appPassword.length > 256) return res.status(400).json({ message: "App password is too long" });
+
+  const existing = await SmtpSettings.findOne({ key: "default" });
+  const environmentPassword = process.env.SMTP_PASS || "";
+  if (!appPassword && !existing?.passwordCiphertext && !environmentPassword) {
+    return res.status(400).json({ message: "Enter an app password. Leave it blank only to keep the currently configured password." });
+  }
+
+  let encrypted;
+  try {
+    smtpEncryptionKey();
+    if (appPassword) encrypted = encryptSmtpPassword(appPassword);
+    else if (existing?.passwordCiphertext) {
+      decryptSmtpPassword(existing);
+      encrypted = {
+        passwordCiphertext: existing.passwordCiphertext,
+        passwordIv: existing.passwordIv,
+        passwordTag: existing.passwordTag
+      };
+    } else encrypted = encryptSmtpPassword(environmentPassword);
+  } catch (error) {
+    console.error("Could not encrypt SMTP app password:", error.message);
+    return res.status(503).json({ message: "Could not protect the SMTP password. Set or verify SMTP_CONFIG_KEY (at least 32 characters) and retry." });
+  }
+
+  const settings = await SmtpSettings.findOneAndUpdate(
+    { key: "default" },
+    {
+      $set: {
+        host, port, username,
+        ...encrypted,
+        lastTestedAt: null
+      },
+      $setOnInsert: { key: "default" }
+    },
+    { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true }
+  );
+  res.json({
+    message: "SMTP settings saved securely in MongoDB. Send a test email to verify delivery.",
+    settings: {
+      host: settings.host,
+      port: settings.port,
+      username: settings.username,
+      passwordConfigured: true,
+      source: "database",
+      lastTestedAt: settings.lastTestedAt
+    }
+  });
+});
+
+app.post("/api/admin/smtp/test", auth, adminOnly, async (req, res) => {
+  try {
+    const config = await getSmtpConfig();
+    if (!config.host || !config.username || !config.password) {
+      return res.status(400).json({ message: "Save complete SMTP settings and an app password before testing." });
+    }
+    const transporter = createSmtpTransport(config);
+    await transporter.verify();
+    await transporter.sendMail({
+      from: config.from,
+      to: req.user.email,
+      subject: "Smart Energy Meter SMTP test",
+      text: `SMTP is configured and working for password reset emails.\nTest requested by ${req.user.email}.`
+    });
+    const lastTestedAt = new Date();
+    await SmtpSettings.updateOne({ key: "default" }, { $set: { lastTestedAt } });
+    res.json({ message: `Test email sent to ${req.user.email}.`, lastTestedAt });
+  } catch (error) {
+    console.error("SMTP test failed:", error.message);
+    res.status(502).json({ message: "SMTP test failed. Check the host, port, username, app password, and sender, then try again." });
+  }
 });
 
 app.get("/api/admin/settings", auth, adminOnly, async (req, res) => {

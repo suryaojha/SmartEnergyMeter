@@ -1,6 +1,16 @@
 const $ = id => document.getElementById(id);
 let user, meters = [], charts = {}, currentMeter, refreshErrorShown = false;
 
+document.querySelectorAll(".user-navbtn").forEach(button => {
+  button.addEventListener("click", () => {
+    document.querySelectorAll(".user-navbtn").forEach(item => item.classList.remove("active"));
+    document.querySelectorAll(".user-section").forEach(item => item.classList.remove("active"));
+    button.classList.add("active");
+    $(button.dataset.tab).classList.add("active");
+    if (button.dataset.tab === "analytics") loadConsumption();
+  });
+});
+
 (async () => {
   user = await requireRole("User");
   if (!user) return;
@@ -29,16 +39,27 @@ function comparison(current, previous, label) {
   return `${label}: ${money(previous)} · ${difference <= 0 ? "down" : "up"} ₹${Math.abs(difference).toFixed(2)}${percent == null ? "" : ` (${percent.toFixed(1)}%)`}`;
 }
 
+function duration(seconds) {
+  if (seconds == null || !Number.isFinite(Number(seconds))) return "--";
+  const total = Math.max(0, Math.floor(seconds));
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor(total % 86400 / 3600);
+  const minutes = Math.floor(total % 3600 / 60);
+  return days ? `${days}d ${hours}h` : hours ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
 async function loadMeters() {
   try {
     meters = await API.request("/api/user/meters");
     if (!meters.length) {
       $("noMeter").style.display = "block";
-      $("meterArea").style.display = "none";
+      document.querySelectorAll(".user-section").forEach(section => {
+        if (section.id !== "account") section.style.display = "none";
+      });
       return;
     }
     $("noMeter").style.display = "none";
-    $("meterArea").style.display = "block";
+    document.querySelectorAll(".user-section").forEach(section => section.style.display = "");
     const old = $("meterSelect").value;
     $("meterSelect").innerHTML = meters.map(m => `<option value="${esc(m.meterId)}">${esc(m.meterName || m.meterId)}</option>`).join("");
     $("meterSelect").value = old && meters.some(m => m.meterId === old) ? old : meters[0].meterId;
@@ -56,6 +77,8 @@ $("meterSelect").onchange = async () => {
   await loadConsumption();
 };
 
+$("graphPeriod").onchange = loadConsumption;
+
 async function refreshLive() {
   try {
     meters = await API.request("/api/user/meters");
@@ -71,20 +94,24 @@ async function refreshLive() {
   }
 }
 
-function renderLive(m) {
-  if (!m) return;
-  $("online").textContent = m.online ? "LIVE" : "OFFLINE";
-  $("online").style.color = m.online ? "#16a34a" : "#dc2626";
-  $("lastReceived").textContent = m.lastSeen ? `Last data: ${new Date(m.lastSeen).toLocaleString()}` : "Last data: --";
-  $("voltage").textContent = display(m.voltage, " V", 1);
-  $("current").textContent = display(m.current, " A", 2);
-  $("power").textContent = display(m.power, " W", 1);
-  $("energy").textContent = display(m.energy, " kWh", 3);
-  $("powerFactor").textContent = display(m.powerFactor, "", 2);
-  $("frequency").textContent = display(m.frequency, " Hz", 2);
-  const present = [m.voltage, m.current, m.power, m.energy, m.frequency, m.powerFactor].filter(v => v != null).length;
+function renderLive(meter) {
+  if (!meter) return;
+  $("online").textContent = meter.online ? "LIVE" : "OFFLINE";
+  $("online").style.color = meter.online ? "#16a34a" : "#dc2626";
+  $("lastReceived").textContent = meter.lastSeen ? `Last data: ${new Date(meter.lastSeen).toLocaleString()}` : "Last data: --";
+  $("onlineDuration").textContent = duration(meter.uptimeSeconds);
+  $("onlineSince").textContent = meter.onlineSince
+    ? `${meter.online ? "Online since" : "Last online since"} ${new Date(meter.onlineSince).toLocaleString()}`
+    : "Online duration unavailable";
+  $("voltage").textContent = display(meter.voltage, " V", 1);
+  $("current").textContent = display(meter.current, " A", 2);
+  $("power").textContent = display(meter.power, " W", 1);
+  $("energy").textContent = display(meter.energy, " kWh", 3);
+  $("powerFactor").textContent = display(meter.powerFactor, "", 2);
+  $("frequency").textContent = display(meter.frequency, " Hz", 2);
+  const present = [meter.voltage, meter.current, meter.power, meter.energy, meter.frequency, meter.powerFactor].filter(value => value != null).length;
   $("sensorStatus").textContent = present === 6 ? "OK" : present ? `${present}/6 available` : "--";
-  $("relayStatus").textContent = `Relay: ${m.status || "--"} | Command: ${m.command || "--"}`;
+  $("relayStatus").textContent = `Relay: ${meter.status || "--"} | Command: ${meter.command || "--"}`;
 }
 
 async function setCommand(command) {
@@ -100,8 +127,9 @@ async function setCommand(command) {
 async function loadConsumption() {
   const meterId = $("meterSelect").value;
   if (!meterId) return;
+  const range = $("graphPeriod").value;
   try {
-    const data = await API.request(`/api/meters/${encodeURIComponent(meterId)}/consumption?days=${$("daysSelect").value}`);
+    const data = await API.request(`/api/meters/${encodeURIComponent(meterId)}/consumption?range=${encodeURIComponent(range)}`);
     renderAnalytics(data);
   } catch (e) {
     toast(`Could not load usage data: ${e.message}`);
@@ -150,23 +178,62 @@ function renderAnalytics(data) {
   $("wheelingCharge").textContent = money(bill.wheelingCharges);
   $("fixedCharge").textContent = money(bill.fixedCharges);
   $("otherCharge").textContent = money(bill.otherCharges);
+  renderAlerts(data.alerts || [], data.meter.meterId);
 
-  const alerts = data.alerts || [];
-  $("alertsList").innerHTML = alerts.length
-    ? alerts.map(alert => `<div class="alert-item ${alert.severity === "high" ? "alert-high" : ""}"><b>${esc(alert.type.replaceAll("-", " "))}</b><span>${esc(alert.message)}</span></div>`).join("")
-    : `<div class="status-text">${data.meter.online ? "No active alerts." : "Meter offline; waiting for readings."}</div>`;
   const suggestions = data.suggestions || [];
   $("suggestionsList").innerHTML = suggestions.length
     ? suggestions.map(item => `<li>${esc(item)}</li>`).join("")
     : "<li>No saving suggestions yet. More real readings improve usage insights.</li>";
 
-  renderChart("hourlyChart", "bar", data.hourly.map(row => `${row.hour}:00`), data.hourly.map(row => row.kwh), "kWh");
+  const range = $("graphPeriod").value;
+  const rangeLabel = { "24h": "last 24 hours", "7d": "last 7 days", "30d": "last 30 days", "90d": "last 90 days" }[range];
+  $("graphPeriodLabel").textContent = `Hourly, daily, and usage history for the ${rangeLabel}. Monthly and weekly charts show their named intervals.`;
+  renderChart("hourlyChart", "bar", data.hourly.map(row => row.hour), data.hourly.map(row => row.kwh), "kWh");
   renderChart("dailyChart", "line", data.daily.map(row => row.date), data.daily.map(row => row.kwh), "kWh");
   renderChart("monthlyChart", "bar", data.monthly.map(row => row.month), data.monthly.map(row => row.kwh), "kWh");
   renderChart("weeklyChart", "bar", data.weekly.map(row => row.date), data.weekly.map(row => row.kwh), "kWh");
   $("consTable").innerHTML = data.table.map(row => `<tr><td>${esc(row.date)}</td><td>${display(row.kwh, "", 4)}</td><td>${money(row.bill?.cost)}</td><td>${row.samples}</td></tr>`).join("")
     || `<tr><td colspan="4">No readings available for this period.</td></tr>`;
 }
+
+function renderAlerts(alerts, meterId) {
+  $("alertsList").innerHTML = alerts.length
+    ? alerts.map(alert => `<div class="alert-item ${alert.severity === "high" ? "alert-high" : ""}"><b>${esc(alert.type.replaceAll("-", " "))}</b><span>${esc(alert.message)}</span></div>`).join("")
+    : `<div class="status-text">${currentMeter?.online ? "No active alerts." : "Meter offline; waiting for readings."}</div>`;
+
+  const key = `energy-alerts:${user.id}:${meterId}`;
+  const previous = new Set(JSON.parse(sessionStorage.getItem(key) || "[]"));
+  const active = new Set(alerts.map(alert => alert.type));
+  const fresh = alerts.filter(alert => !previous.has(alert.type));
+  sessionStorage.setItem(key, JSON.stringify([...active]));
+  if (fresh.length) {
+    $("alertDialogContent").innerHTML = fresh.map(alert => `<div class="alert-item ${alert.severity === "high" ? "alert-high" : ""}"><b>${esc(alert.type.replaceAll("-", " "))}</b><span>${esc(alert.message)}</span></div>`).join("");
+    if (!$("alertDialog").open) $("alertDialog").showModal();
+  }
+}
+
+$("closeAlert").addEventListener("click", () => $("alertDialog").close());
+
+$("changePasswordForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const message = $("passwordMessage");
+  const newPassword = $("newPassword").value;
+  if (newPassword !== $("confirmPassword").value) {
+    message.textContent = "New passwords do not match.";
+    return;
+  }
+  message.textContent = "Updating password...";
+  try {
+    const result = await API.request("/api/auth/change-password", {
+      method: "PUT",
+      body: { currentPassword: $("currentPassword").value, newPassword }
+    });
+    $("changePasswordForm").reset();
+    message.textContent = result.message;
+  } catch (error) {
+    message.textContent = error.message;
+  }
+});
 
 function renderChart(id, type, labels, values, label) {
   if (charts[id]) charts[id].destroy();

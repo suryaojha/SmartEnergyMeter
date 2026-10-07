@@ -33,6 +33,7 @@ Preferences prefs;
 
 String serverBase = "";
 String meterId = "";
+String deviceToken = "";
 
 bool relayState = false;
 unsigned long updateFrequency = 5;
@@ -45,17 +46,46 @@ String jsonNumber(float value, int decimals) {
   return String(value, decimals);
 }
 
+String jsonEscape(String value) {
+  value.replace("\\", "\\\\");
+  value.replace("\"", "\\\"");
+  value.replace("\n", "\\n");
+  value.replace("\r", "\\r");
+  return value;
+}
+
+void authorize(HTTPClient &http) {
+  http.addHeader("Authorization", "Bearer " + deviceToken);
+}
+
 String extractString(String body, String key) {
   String pattern = "\"" + key + "\"";
   int p = body.indexOf(pattern);
   if (p < 0) return "";
   p = body.indexOf(":", p);
   if (p < 0) return "";
-  p = body.indexOf("\"", p);
-  if (p < 0) return "";
-  int e = body.indexOf("\"", p + 1);
-  if (e < 0) return "";
-  return body.substring(p + 1, e);
+  p++;
+  while (p < body.length() && (body[p] == ' ' || body[p] == '\t')) p++;
+  if (p >= body.length() || body[p] != '"') return "";
+  String value;
+  bool escaped = false;
+  for (int i = p + 1; i < body.length(); i++) {
+    char c = body[i];
+    if (escaped) {
+      if (c == 'n') value += '\n';
+      else if (c == 'r') value += '\r';
+      else if (c == 't') value += '\t';
+      else value += c;
+      escaped = false;
+    } else if (c == '\\') {
+      escaped = true;
+    } else if (c == '"') {
+      return value;
+    } else {
+      value += c;
+    }
+  }
+  return "";
 }
 
 long extractNumber(String body, String key, long fallback) {
@@ -77,13 +107,73 @@ void applyRelay(bool on) {
   digitalWrite(RELAY_PIN, on ? RELAY_ON : RELAY_OFF);
 }
 
-void pollCommand() {
-  if (WiFi.status() != WL_CONNECTED || serverBase.length() == 0 || meterId.length() == 0) return;
+void postWifiStatus(unsigned long revision, bool connected, String ssid, String error = "") {
+  if (WiFi.status() != WL_CONNECTED || serverBase.length() == 0 || deviceToken.length() == 0) return;
+  HTTPClient http;
+  http.begin(serverBase + "/api/device/" + meterId + "/wifi-status");
+  http.addHeader("Content-Type", "application/json");
+  authorize(http);
+  String json = "{\"revision\":" + String(revision) + ",";
+  json += "\"connected\":" + String(connected ? "true" : "false") + ",";
+  json += "\"ssid\":\"" + jsonEscape(ssid) + "\",";
+  json += "\"error\":\"" + jsonEscape(error) + "\"}";
+  http.POST(json);
+  http.end();
+}
+
+void reportWifiScan() {
+  if (WiFi.status() != WL_CONNECTED || deviceToken.length() == 0) return;
+  int count = WiFi.scanNetworks(false, true);
+  String json = "{\"networks\":[";
+  bool first = true;
+  for (int i = 0; i < count && i < 30; i++) {
+    String ssid = WiFi.SSID(i);
+    if (!ssid.length()) continue;
+    if (!first) json += ",";
+    first = false;
+    json += "{\"ssid\":\"" + jsonEscape(ssid) + "\",";
+    json += "\"rssi\":" + String(WiFi.RSSI(i)) + ",";
+    json += "\"secure\":" + String(WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "false" : "true") + "}";
+  }
+  json += "]}";
+  WiFi.scanDelete();
 
   HTTPClient http;
-  String url = serverBase + "/api/meter/" + meterId + "/command";
+  http.begin(serverBase + "/api/device/" + meterId + "/wifi-scan");
+  http.addHeader("Content-Type", "application/json");
+  authorize(http);
+  int code = http.POST(json);
+  Serial.printf("WiFi scan report: %d\n", code);
+  http.end();
+}
+
+void applyWifiConfig(String ssid, String password, unsigned long revision) {
+  if (!ssid.length()) return;
+  Serial.printf("Applying administrator WiFi configuration (revision %lu)\n", revision);
+  WiFi.disconnect(false, false);
+  WiFi.begin(ssid.c_str(), password.c_str());
+  unsigned long started = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - started < 20000) {
+    delay(250);
+  }
+  if (WiFi.status() == WL_CONNECTED && WiFi.SSID() == ssid) {
+    prefs.begin("energy", false);
+    prefs.putULong("wifiRev", revision);
+    prefs.end();
+    postWifiStatus(revision, true, ssid);
+  } else {
+    postWifiStatus(revision, false, ssid, "Connection timed out");
+  }
+}
+
+void pollCommand() {
+  if (WiFi.status() != WL_CONNECTED || serverBase.length() == 0 || meterId.length() == 0 || deviceToken.length() == 0) return;
+
+  HTTPClient http;
+  String url = serverBase + "/api/device/" + meterId + "/settings";
   http.begin(url);
   http.setTimeout(1500);
+  authorize(http);
 
   int code = http.GET();
   if (code == 200) {
@@ -96,26 +186,51 @@ void pollCommand() {
 }
 
 void pollSettings() {
-  if (WiFi.status() != WL_CONNECTED || serverBase.length() == 0 || meterId.length() == 0) return;
+  if (WiFi.status() != WL_CONNECTED || serverBase.length() == 0 || meterId.length() == 0 || deviceToken.length() == 0) return;
 
   HTTPClient http;
-  String url = serverBase + "/api/meter/" + meterId + "/settings";
+  String url = serverBase + "/api/device/" + meterId + "/settings";
   http.begin(url);
   http.setTimeout(1500);
+  authorize(http);
 
   int code = http.GET();
+  String body;
   if (code == 200) {
-    String body = http.getString();
+    body = http.getString();
     long f = extractNumber(body, "updateFrequency", updateFrequency);
     if (f < 1) f = 1;
     if (f > 3600) f = 3600;
     updateFrequency = (unsigned long)f;
   }
   http.end();
+
+  if (code != 200) return;
+  if (body.indexOf("\"wifiScanRequested\":true") >= 0) reportWifiScan();
+
+  int configStart = body.indexOf("\"wifiConfig\":{");
+  if (configStart < 0) return;
+  configStart = body.indexOf("{", configStart);
+  int configEnd = body.indexOf("}", configStart);
+  if (configStart < 0 || configEnd < 0) return;
+  String config = body.substring(configStart, configEnd + 1);
+  String ssid = extractString(config, "ssid");
+  String password = extractString(config, "password");
+  long revision = extractNumber(config, "revision", 0);
+  if (!ssid.length() || revision <= 0) return;
+
+  prefs.begin("energy", true);
+  unsigned long appliedRevision = prefs.getULong("wifiRev", 0);
+  prefs.end();
+  if ((unsigned long)revision > appliedRevision) {
+    applyWifiConfig(ssid, password, (unsigned long)revision);
+  } else if (WiFi.status() == WL_CONNECTED && WiFi.SSID() == ssid) {
+    postWifiStatus((unsigned long)revision, true, ssid);
+  }
 }
 
 void sendMeterData() {
-  if (WiFi.status() != WL_CONNECTED || serverBase.length() == 0 || meterId.length() == 0) return;
+  if (WiFi.status() != WL_CONNECTED || serverBase.length() == 0 || meterId.length() == 0 || deviceToken.length() == 0) return;
 
   float voltage = pzem.voltage();
   float current = pzem.current();
@@ -138,6 +253,7 @@ void sendMeterData() {
   http.begin(url);
   http.addHeader("Content-Type", "application/json");
   http.setTimeout(2000);
+  authorize(http);
 
   String json = "{";
   json += "\"meterId\":\"" + meterId + "\",";
@@ -164,15 +280,18 @@ void sendMeterData() {
   http.end();
 }
 
-void saveConfig(String newServer, String newMeter) {
+void saveConfig(String newServer, String newMeter, String newToken) {
   serverBase = newServer;
   meterId = newMeter;
+  deviceToken = newToken;
   serverBase.trim();
   meterId.trim();
+  deviceToken.trim();
   if (!serverBase.endsWith("/")) serverBase.remove(serverBase.length() - 1);
   prefs.begin("energy", false);
   prefs.putString("server", serverBase);
   prefs.putString("meter", meterId);
+  prefs.putString("deviceToken", deviceToken);
   prefs.end();
 }
 
@@ -186,9 +305,11 @@ void setup() {
   prefs.begin("energy", true);
   String savedServer = prefs.getString("server", serverBase);
   String savedMeter = prefs.getString("meter", meterId);
+  String savedToken = prefs.getString("deviceToken", deviceToken);
   prefs.end();
   if (savedServer.length()) serverBase = savedServer;
   if (savedMeter.length()) meterId = savedMeter;
+  if (savedToken.length()) deviceToken = savedToken;
 
   WiFiManager wm;
   // If saved Wi-Fi is unavailable, WiFiManager automatically opens this setup portal.
@@ -200,13 +321,15 @@ void setup() {
   wm.setTitle("SPO Energy Meter - WiFi Setup");
   WiFiManagerParameter serverParam("server", "Node.js Server URL", serverBase.c_str(), 100);
   WiFiManagerParameter meterParam("meter", "Meter ID", meterId.c_str(), 30);
+  WiFiManagerParameter tokenParam("token", "One-time device token from admin dashboard", deviceToken.c_str(), 70);
   wm.addParameter(&serverParam);
   wm.addParameter(&meterParam);
+  wm.addParameter(&tokenParam);
 
   Serial.println("Connecting WiFi...");
   Serial.println("Set the Node.js server URL and meter ID in the WiFi setup portal.");
   Serial.println("If saved WiFi cannot be connected, the ESP32 will automatically open the WiFi setup portal.");
-  bool connected = serverBase.length() == 0 || meterId.length() == 0
+  bool connected = serverBase.length() == 0 || meterId.length() == 0 || deviceToken.length() == 0
     ? wm.startConfigPortal("ENERGY-METER-SETUP")
     : wm.autoConnect("ENERGY-METER-SETUP");
   if (!connected) {
@@ -215,7 +338,7 @@ void setup() {
     ESP.restart();
   }
 
-  saveConfig(serverParam.getValue(), meterParam.getValue());
+  saveConfig(serverParam.getValue(), meterParam.getValue(), tokenParam.getValue());
 
   Serial.println("WiFi connected");
   Serial.print("ESP32 IP: ");

@@ -8,6 +8,8 @@ document.querySelectorAll(".navbtn").forEach(button => {
     button.classList.add("active");
     $(button.dataset.tab).classList.add("active");
     if (button.dataset.tab === "consumption") loadConsumption();
+    if (button.dataset.tab === "wifi") loadWifiStatus();
+    if (button.dataset.tab === "smtp") loadSmtpSettings();
   };
 });
 
@@ -17,6 +19,9 @@ document.querySelectorAll(".navbtn").forEach(button => {
   $("adminName").textContent = currentUser.name;
   await Promise.all([loadOverview(), loadMeters(), loadUsers(), loadTariffs(), loadSettings()]);
   setInterval(loadOverview, 5000);
+  setInterval(() => {
+    if ($("wifi").classList.contains("active")) loadWifiStatus();
+  }, 5000);
 })();
 
 function display(value, suffix = "", digits = 2) {
@@ -29,6 +34,15 @@ function money(value) {
   return value === null || value === undefined || !Number.isFinite(Number(value))
     ? "--"
     : `₹${Number(value).toFixed(2)}`;
+}
+
+function duration(seconds) {
+  if (seconds == null) return "--";
+  const total = Math.max(0, Math.floor(seconds));
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor(total % 86400 / 3600);
+  const minutes = Math.floor(total % 3600 / 60);
+  return days ? `${days}d ${hours}h` : hours ? `${hours}h ${minutes}m` : `${minutes}m`;
 }
 
 async function loadOverview() {
@@ -56,7 +70,7 @@ function meterCard(meter) {
       <div class="reading"><span class="label">Power factor</span><b>${display(meter.powerFactor)}</b></div>
       <div class="reading"><span class="label">Frequency</span><b>${display(meter.frequency, " Hz")}</b></div>
     </div>
-    <div class="actions"><span class="pill ${meter.status === "ON" ? "on" : "off"}">Relay ${esc(meter.status || "--")}</span><span class="status-text">Last data: ${meter.lastSeen ? esc(new Date(meter.lastSeen).toLocaleString()) : "--"}</span></div>
+    <div class="actions"><span class="pill ${meter.status === "ON" ? "on" : "off"}">Relay ${esc(meter.status || "--")}</span><span class="status-text">${meter.online ? "Online" : "Last online"}: ${duration(meter.uptimeSeconds)} · Last data: ${meter.lastSeen ? esc(new Date(meter.lastSeen).toLocaleString()) : "--"}</span></div>
   </div>`;
 }
 
@@ -70,15 +84,17 @@ async function loadMeters() {
       if (!frequencies.includes(freq)) frequencies.push(freq);
       return `<tr>
         <td><b>${esc(meter.meterId)}</b><input class="meter-name-input" value="${esc(meter.meterName || "")}" placeholder="Meter name" data-meter-name="${esc(meter.meterId)}" aria-label="Meter name"></td>
-        <td><span class="pill ${meter.online ? "online" : "offline"}">${meter.online ? "ONLINE" : "OFFLINE"}</span><div class="status-text">${meter.lastSeen ? esc(new Date(meter.lastSeen).toLocaleString()) : "No data received"}</div></td>
+        <td><span class="pill ${meter.online ? "online" : "offline"}">${meter.online ? "ONLINE" : "OFFLINE"}</span><div class="status-text">${meter.online ? `Online ${duration(meter.uptimeSeconds)}` : "Offline"}<br>${meter.lastSeen ? esc(new Date(meter.lastSeen).toLocaleString()) : "No data received"}</div></td>
         <td>${esc(meter.status || "--")} <small>(${esc(meter.command || "--")})</small></td>
         <td>${esc(meter.userId?.name || "Unassigned")}</td>
         <td><select data-frequency="${esc(meter.meterId)}">${frequencies.sort((a, b) => a - b).map(value => `<option value="${value}" ${value === freq ? "selected" : ""}>${value} sec</option>`).join("")}</select></td>
         <td><button class="btn small success" data-command="ON" data-meter="${esc(meter.meterId)}">ON</button> <button class="btn small danger" data-command="OFF" data-meter="${esc(meter.meterId)}">OFF</button></td>
         <td><select data-assignment="${esc(meter.meterId)}"><option value="">Unassigned</option>${users.map(user => `<option value="${esc(user._id)}" ${String(meter.userId?._id || "") === String(user._id) ? "selected" : ""}>${esc(user.name)} - ${esc(user.email)}</option>`).join("")}</select></td>
+        <td><button class="btn small secondary" data-device-token="${esc(meter.meterId)}">${meter.devicePaired ? "Rotate token" : "Pair device"}</button></td>
       </tr>`;
-    }).join("") || `<tr><td colspan="7">No meters registered yet.</td></tr>`;
+    }).join("") || `<tr><td colspan="8">No meters registered yet.</td></tr>`;
     fillConsumptionMeters();
+    fillWifiMeters();
   } catch (e) {
     toast(e.message);
   }
@@ -99,6 +115,35 @@ $("meterTable").addEventListener("change", event => {
 $("meterTable").addEventListener("click", event => {
   const button = event.target.closest("[data-command]");
   if (button) setCommand(button.dataset.meter, button.dataset.command);
+  const tokenButton = event.target.closest("[data-device-token]");
+  if (tokenButton) issueDeviceToken(tokenButton.dataset.deviceToken);
+});
+
+async function issueDeviceToken(meterId) {
+  if (!confirm("Issue a new one-time device token? Any token already installed on the ESP32 will stop working.")) return;
+  try {
+    const result = await API.request(`/api/admin/meters/${encodeURIComponent(meterId)}/device-token`, { method: "POST" });
+    showDeviceToken(result.deviceToken);
+    await loadMeters();
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+function showDeviceToken(token) {
+  $("deviceTokenValue").value = token;
+  $("deviceTokenDialog").showModal();
+}
+
+$("closeDeviceToken").addEventListener("click", () => $("deviceTokenDialog").close());
+$("copyDeviceToken").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText($("deviceTokenValue").value);
+    toast("Device token copied");
+  } catch {
+    $("deviceTokenValue").select();
+    toast("Select and copy the token manually");
+  }
 });
 
 async function saveMeterName(id, meterName) {
@@ -143,11 +188,12 @@ async function assignMeter(id, userId) {
 $("meterForm").onsubmit = async event => {
   event.preventDefault();
   try {
-    await API.request("/api/admin/meters", {
+    const result = await API.request("/api/admin/meters", {
       method: "POST",
       body: { meterId: $("newMeterId").value, meterName: $("newMeterName").value, updateFrequency: Number($("newMeterFrequency").value) }
     });
-    toast("Meter registered. Configure its ESP32 with this meter ID and server URL.");
+    showDeviceToken(result.deviceToken);
+    toast("Meter registered. Save the one-time token in the ESP32 setup portal.");
     $("meterForm").reset();
     $("newMeterFrequency").value = "5";
     await loadMeters();
@@ -155,6 +201,84 @@ $("meterForm").onsubmit = async event => {
     toast(e.message);
   }
 };
+
+function fillWifiMeters() {
+  const previous = $("wifiMeter").value;
+  $("wifiMeter").innerHTML = meters.map(meter => `<option value="${esc(meter.meterId)}">${esc(meter.meterName || meter.meterId)}</option>`).join("");
+  if (meters.some(meter => meter.meterId === previous)) $("wifiMeter").value = previous;
+  $("wifiScan").disabled = !meters.length;
+  loadWifiStatus();
+}
+
+$("wifiMeter").addEventListener("change", loadWifiStatus);
+$("wifiScan").addEventListener("click", async () => {
+  const meterId = $("wifiMeter").value;
+  if (!meterId) return;
+  try {
+    const result = await API.request(`/api/admin/meters/${encodeURIComponent(meterId)}/wifi/scan`, { method: "POST" });
+    $("wifiMessage").textContent = result.message;
+    await loadWifiStatus();
+  } catch (e) {
+    $("wifiMessage").textContent = e.message;
+  }
+});
+
+async function loadWifiStatus() {
+  const meterId = $("wifiMeter").value;
+  if (!meterId) {
+    $("wifiStatus").textContent = "Register a meter first.";
+    return;
+  }
+  try {
+    const state = await API.request(`/api/admin/meters/${encodeURIComponent(meterId)}/wifi`);
+    const statusLabels = {
+      unconfigured: "Not configured",
+      "scan-requested": "Waiting for ESP32 scan",
+      scanned: "Networks scanned",
+      pending: "Settings saved; waiting for ESP32 connection",
+      connected: "Connected",
+      failed: "Connection failed"
+    };
+    $("wifiStatus").textContent = `${state.online ? "ESP32 online" : "ESP32 offline"} · ${state.paired ? "paired" : "not paired"} · ${statusLabels[state.status] || state.status}${state.selectedSsid ? ` · ${state.selectedSsid}` : ""}${state.error ? ` · ${state.error}` : ""}${state.scannedAt ? ` · scanned ${new Date(state.scannedAt).toLocaleTimeString()}` : ""}`;
+    const oldSelection = $("wifiNetworks").value;
+    $("wifiNetworks").innerHTML = `<option value="">Choose a scanned network</option>${state.networks.map(network => `<option value="${esc(network.ssid)}" ${network.secure ? "data-secure=\"true\"" : "data-secure=\"false\""}>${esc(network.ssid)} (${network.rssi} dBm)${network.secure ? "" : " · open"}</option>`).join("")}`;
+    if (state.networks.some(network => network.ssid === oldSelection)) $("wifiNetworks").value = oldSelection;
+    $("wifiScan").disabled = !state.paired;
+    $("wifiConnect").disabled = !state.paired || !state.networks.length;
+    $("wifiMessage").textContent = !state.paired
+      ? "Pair this meter in Meters & Control and enter its one-time device token in the ESP32 portal."
+      : state.scanRequested
+        ? "Scan requested. Keep the ESP32 powered and online while it reports results."
+        : "";
+    if (state.error) $("wifiMessage").textContent = state.error;
+  } catch (e) {
+    $("wifiStatus").textContent = e.message;
+  }
+}
+
+$("wifiConnectForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const meterId = $("wifiMeter").value;
+  const ssid = $("wifiNetworks").value;
+  const password = $("wifiPassword").value;
+  if (!meterId || !ssid) return;
+  const selected = $("wifiNetworks").selectedOptions[0];
+  if (selected.dataset.secure === "true" && (password.length < 8 || password.length > 63)) {
+    $("wifiMessage").textContent = "Enter a Wi-Fi password between 8 and 63 characters.";
+    return;
+  }
+  try {
+    const result = await API.request(`/api/admin/meters/${encodeURIComponent(meterId)}/wifi/connect`, {
+      method: "POST",
+      body: { ssid, password }
+    });
+    $("wifiPassword").value = "";
+    $("wifiMessage").textContent = result.message;
+    await loadWifiStatus();
+  } catch (e) {
+    $("wifiMessage").textContent = e.message;
+  }
+});
 
 async function loadUsers() {
   try {
@@ -327,3 +451,65 @@ $("settingsForm").onsubmit = async event => {
     toast(e.message);
   }
 };
+
+async function loadSmtpSettings() {
+  try {
+    const settings = await API.request("/api/admin/smtp");
+    $("smtpHost").value = settings.host || "";
+    $("smtpPort").value = settings.port || "";
+    $("smtpUsername").value = settings.username || "";
+    $("smtpAppPassword").value = "";
+    $("smtpConfigured").textContent = settings.passwordConfigured ? "CREDENTIAL CONFIGURED" : "NOT CONFIGURED";
+    $("smtpConfigured").className = `pill ${settings.passwordConfigured ? "online" : "offline"}`;
+    $("smtpStatus").textContent = `Settings source: ${settings.source}. ${settings.lastTestedAt ? `Last successful test: ${new Date(settings.lastTestedAt).toLocaleString()}.` : "No successful test email recorded."}`;
+    $("smtpTestButton").disabled = !settings.passwordConfigured;
+  } catch (e) {
+    $("smtpStatus").textContent = e.message;
+    $("smtpConfigured").textContent = "SETUP REQUIRED";
+    $("smtpConfigured").className = "pill offline";
+    $("smtpTestButton").disabled = true;
+  }
+}
+
+$("smtpForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const button = $("smtpForm").querySelector('button[type="submit"]');
+  button.disabled = true;
+  $("smtpMessage").textContent = "Encrypting and saving SMTP settings…";
+  try {
+    const settings = await API.request("/api/admin/smtp", {
+      method: "PUT",
+      body: {
+        host: $("smtpHost").value,
+        port: Number($("smtpPort").value),
+        username: $("smtpUsername").value,
+        appPassword: $("smtpAppPassword").value
+      }
+    });
+    $("smtpAppPassword").value = "";
+    $("smtpMessage").textContent = settings.message;
+    toast("Mail settings saved");
+    await loadSmtpSettings();
+  } catch (e) {
+    $("smtpMessage").textContent = e.message;
+    toast(e.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("smtpTestButton").addEventListener("click", async () => {
+  const button = $("smtpTestButton");
+  button.disabled = true;
+  $("smtpMessage").textContent = "Sending a test email to your administrator account…";
+  try {
+    const result = await API.request("/api/admin/smtp/test", { method: "POST" });
+    $("smtpMessage").textContent = `${result.message} Delivery verified at ${new Date(result.lastTestedAt).toLocaleString()}.`;
+    toast("SMTP test email sent");
+    await loadSmtpSettings();
+  } catch (e) {
+    $("smtpMessage").textContent = e.message;
+    toast(e.message);
+    button.disabled = false;
+  }
+});
