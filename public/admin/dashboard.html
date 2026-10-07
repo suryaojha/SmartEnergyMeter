@@ -1,11 +1,141 @@
-<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Admin Dashboard | Energy Meter</title><link rel="stylesheet" href="/css/style.css"><script src="https://cdn.jsdelivr.net/npm/chart.js"></script></head><body><header class="topbar"><div class="brand">Energy <span>Meter</span> / Admin</div><div class="userbox"><span id="adminName"></span><button class="btn small secondary" onclick="logout()">Logout</button></div></header><div class="layout"><aside class="sidebar"><button class="navbtn active" data-tab="overview">Dashboard</button><button class="navbtn" data-tab="meters">Meters & Control</button><button class="navbtn" data-tab="consumption">Consumption</button><button class="navbtn" data-tab="users">Users</button><button class="navbtn" data-tab="tariffs">Cost Slabs</button></aside><main class="main">
-<section id="overview" class="section active"><h1 class="page-title">Dashboard</h1><p class="muted">Live system overview. Readings update continuously; meter management refreshes only when needed.</p><div class="grid cards"><div class="card"><div class="label">Total meters</div><div class="metric" id="totalMeters">0</div></div><div class="card"><div class="label">Online</div><div class="metric" id="onlineMeters">0</div></div><div class="card"><div class="label">Devices ON</div><div class="metric" id="onMeters">0</div></div><div class="card"><div class="label">Users</div><div class="metric" id="totalUsers">0</div></div></div><div class="panel"><div class="toolbar"><div><b>Live meters</b><div class="muted">Physical relay state is updated by ESP32 data.</div></div></div><div id="overviewMeters" class="grid meter-grid"></div></div></section>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin Dashboard | Smart Energy Meter</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Energy <span>Meter</span> / Admin</div>
+    <div class="userbox"><span id="adminName"></span><button class="btn small secondary" onclick="logout()">Logout</button></div>
+  </header>
+  <div class="layout">
+    <aside class="sidebar">
+      <button class="navbtn active" data-tab="overview">Dashboard</button>
+      <button class="navbtn" data-tab="meters">Meters & Control</button>
+      <button class="navbtn" data-tab="consumption">Consumption</button>
+      <button class="navbtn" data-tab="users">Users</button>
+      <button class="navbtn" data-tab="tariffs">Tariff slabs</button>
+      <button class="navbtn" data-tab="settings">Billing & alerts</button>
+    </aside>
+    <main class="main">
+      <section id="overview" class="section active">
+        <h1 class="page-title">Dashboard</h1>
+        <p class="muted">Only registered device readings are displayed. Missing sensor data is marked unavailable.</p>
+        <div class="grid cards">
+          <div class="card"><div class="label">Total meters</div><div class="metric" id="totalMeters">0</div></div>
+          <div class="card"><div class="label">Online</div><div class="metric" id="onlineMeters">0</div></div>
+          <div class="card"><div class="label">Relays ON</div><div class="metric" id="onMeters">0</div></div>
+          <div class="card"><div class="label">Users</div><div class="metric" id="totalUsers">0</div></div>
+        </div>
+        <div class="panel"><div class="toolbar"><div><b>Live meters</b><div class="muted">Status and data freshness come from ESP32 reports.</div></div></div><div id="overviewMeters" class="grid meter-grid"></div></div>
+      </section>
 
-<section id="meters" class="section"><h1 class="page-title">Meters & Control</h1><p class="muted">Assign meters, set update frequency (minimum 1 second), and control the relay.</p><div class="panel"><div class="toolbar"><b>Meter list</b><button class="btn small" onclick="loadMeters()">Refresh</button></div><div class="table-wrap"><table class="table"><thead><tr><th>Meter</th><th>Online</th><th>Relay</th><th>User</th><th>Frequency</th><th>Control</th><th>Assignment</th></tr></thead><tbody id="meterTable"></tbody></table></div></div></section>
+      <section id="meters" class="section">
+        <h1 class="page-title">Meters & Control</h1>
+        <p class="muted">Register the meter first, then use the same ID in the ESP32 setup portal.</p>
+        <div class="panel">
+          <form id="meterForm" class="form-row">
+            <div class="field"><label for="newMeterId">Meter ID</label><input id="newMeterId" required maxlength="40"></div>
+            <div class="field"><label for="newMeterName">Meter name</label><input id="newMeterName" maxlength="80"></div>
+            <div class="field"><label for="newMeterFrequency">Reading interval (seconds)</label><input id="newMeterFrequency" type="number" min="1" max="3600" value="5" required></div>
+            <div><button class="btn" type="submit">Register meter</button></div>
+          </form>
+        </div>
+        <div class="panel" style="margin-top:16px">
+          <div class="toolbar"><b>Registered meters</b><button class="btn small" onclick="loadMeters()">Refresh</button></div>
+          <div class="table-wrap"><table class="table"><thead><tr><th>ID / name</th><th>Connection</th><th>Relay</th><th>Assigned user</th><th>Interval</th><th>Control</th><th>Assignment</th></tr></thead><tbody id="meterTable"></tbody></table></div>
+        </div>
+      </section>
 
-<section id="consumption" class="section"><h1 class="page-title">Consumption & Billing</h1><p class="muted">Daily/monthly energy, bar graph, cost and current tariff slab.</p><div class="panel"><div class="form-row"><div class="field"><label>Meter</label><select id="consMeter"></select></div><div class="field"><label>Chart period</label><select id="daysSelect"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option></select></div><div class="field" style="justify-content:end"><button class="btn" onclick="loadConsumption()">Load consumption</button></div></div></div><div class="grid cards"><div class="card"><div class="label">Today</div><div class="metric" id="todayKwh">0 kWh</div><div id="todayCost" class="status-text">₹0</div></div><div class="card"><div class="label">This month</div><div class="metric" id="monthKwh">0 kWh</div><div id="monthCost" class="status-text">₹0</div></div><div class="card"><div class="label">Current slab</div><div class="metric" id="currentSlab">-</div><div id="slabRate" class="status-text">-</div></div><div class="card"><div class="label">Selected period</div><div class="metric" id="periodKwh">0 kWh</div></div></div><div class="grid two"><div class="panel"><b>Daily consumption</b><div class="chart-box"><canvas id="dailyChart"></canvas></div></div><div class="panel"><b>Monthly consumption</b><div class="chart-box"><canvas id="monthlyChart"></canvas></div></div></div><div class="panel" style="margin-top:16px"><b>Daily consumption table</b><div class="table-wrap"><table class="table"><thead><tr><th>Date</th><th>Consumption (kWh)</th><th>Estimated cost</th><th>Samples</th></tr></thead><tbody id="consTable"></tbody></table></div></div></section>
+      <section id="consumption" class="section">
+        <h1 class="page-title">Consumption & Billing</h1>
+        <p class="muted">Measured consumption and estimated costs from the configured billing cycle.</p>
+        <div class="panel"><div class="form-row">
+          <div class="field"><label for="consMeter">Meter</label><select id="consMeter"></select></div>
+          <div class="field"><label for="daysSelect">History period</label><select id="daysSelect"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option></select></div>
+          <div class="field" style="justify-content:end"><button class="btn" onclick="loadConsumption()">Load consumption</button></div>
+        </div></div>
+        <div class="grid cards">
+          <div class="card"><div class="label">Today's cost</div><div class="metric" id="todayCost">--</div></div>
+          <div class="card"><div class="label">Current period cost</div><div class="metric" id="monthCost">--</div></div>
+          <div class="card"><div class="label">Expected period-end bill</div><div class="metric" id="expectedBill">--</div></div>
+          <div class="card"><div class="label">Monthly budget used</div><div class="metric" id="budgetUsage">--</div></div>
+          <div class="card"><div class="label">Today units</div><div class="metric" id="todayKwh">--</div></div>
+          <div class="card"><div class="label">Billing-period units</div><div class="metric" id="monthKwh">--</div></div>
+          <div class="card"><div class="label">Current slab</div><div class="metric" id="currentSlab">--</div><div id="slabRate" class="status-text">--</div></div>
+          <div class="card"><div class="label">Peak power</div><div class="metric" id="peakPower">--</div><div id="peakPowerAt" class="status-text">--</div></div>
+        </div>
+        <div class="panel"><div class="toolbar"><b>Bill estimate breakdown</b><b id="billTotal" class="metric compact">--</b></div><div class="grid three billing-breakdown">
+          <div>Energy charges <b id="energyCharges">--</b></div><div>FAC <b id="facCharge">--</b></div><div>Electricity duty <b id="dutyCharge">--</b></div>
+          <div>Wheeling <b id="wheelingCharge">--</b></div><div>Fixed charges <b id="fixedCharge">--</b></div><div>Other charges <b id="otherCharge">--</b></div>
+        </div></div>
+        <div class="grid two">
+          <div class="panel"><b>Hourly usage today</b><div class="chart-box"><canvas id="hourlyChart"></canvas></div></div>
+          <div class="panel"><b>Daily usage</b><div class="chart-box"><canvas id="dailyChart"></canvas></div></div>
+          <div class="panel"><b>Monthly usage</b><div class="chart-box"><canvas id="monthlyChart"></canvas></div></div>
+          <div class="panel"><b>Weekly usage</b><div class="chart-box"><canvas id="weeklyChart"></canvas></div></div>
+        </div>
+        <div class="panel" style="margin-top:16px"><b>Daily consumption and estimated cost</b><div class="table-wrap"><table class="table"><thead><tr><th>Date</th><th>Units (kWh)</th><th>Estimated cost</th><th>Samples</th></tr></thead><tbody id="consTable"></tbody></table></div></div>
+      </section>
 
-<section id="users" class="section"><h1 class="page-title">Users</h1><p class="muted">Create users here, then assign meters from the Meters tab.</p><div class="panel"><form id="userForm" class="form-row"><div class="field"><label>Name</label><input id="newName" required></div><div class="field"><label>Email</label><input id="newEmail" type="email" required></div><div class="field"><label>Temporary password</label><input id="newPassword" value="User@123" required></div><div><button class="btn" type="submit">Create User</button></div></form></div><div class="panel" style="margin-top:16px"><div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Created</th><th>Action</th></tr></thead><tbody id="userTable"></tbody></table></div></div></section>
+      <section id="users" class="section">
+        <h1 class="page-title">Users</h1><p class="muted">Create users here, then assign meters from the Meters tab.</p>
+        <div class="panel"><form id="userForm" class="form-row">
+          <div class="field"><label for="newName">Name</label><input id="newName" required></div>
+          <div class="field"><label for="newEmail">Email</label><input id="newEmail" type="email" required></div>
+          <div class="field"><label for="newPassword">Temporary password</label><input id="newPassword" type="password" minlength="6" required></div>
+          <div><button class="btn" type="submit">Create user</button></div>
+        </form></div>
+        <div class="panel" style="margin-top:16px"><div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Created</th><th>Action</th></tr></thead><tbody id="userTable"></tbody></table></div></div>
+      </section>
 
-<section id="tariffs" class="section"><h1 class="page-title">Cost Slabs</h1><p class="muted">Progressive billing: each range is charged at its own rate. Example: 150 kWh uses slab 1 for first 100 and slab 2 for next 50.</p><div class="panel"><div id="slabEditor"></div><div class="actions" style="margin-top:14px"><button class="btn secondary" onclick="addSlab()">+ Add slab</button><button class="btn" onclick="saveSlabs()">Save tariff slabs</button></div><p id="slabMsg" class="status-text"></p></div></section>
-</main></div><div id="toast" class="toast"></div><script src="/js/common.js"></script><script src="/js/admin.js"></script></body></html>
+      <section id="tariffs" class="section">
+        <h1 class="page-title">Tariff slabs</h1>
+        <p class="muted">Set your utility's progressive per-kWh rates. No cost estimate is shown until a tariff is configured.</p>
+        <div class="panel"><div id="slabEditor"></div><div class="actions" style="margin-top:14px"><button class="btn secondary" onclick="addSlab()">+ Add slab</button><button class="btn" onclick="saveSlabs()">Save tariff slabs</button></div><p id="slabMsg" class="status-text"></p></div>
+      </section>
+
+      <section id="settings" class="section">
+        <h1 class="page-title">Billing & alert settings</h1>
+        <p class="muted">These values are shared by all meters and control user estimates, targets, and threshold alerts.</p>
+        <form id="settingsForm" class="panel">
+          <h2 class="section-title">Billing</h2>
+          <div class="form-row">
+            <div class="field"><label for="billingCycleStartDay">Billing cycle starts on day (1-28)</label><input id="billingCycleStartDay" type="number" min="1" max="28" required></div>
+            <div class="field"><label for="fixedCharge">Fixed charge (₹ / cycle)</label><input id="fixedCharge" type="number" min="0" step="0.01" data-setting></div>
+            <div class="field"><label for="facPerKwh">FAC (₹ / kWh)</label><input id="facPerKwh" type="number" min="0" step="0.01" data-setting></div>
+            <div class="field"><label for="electricityDutyPercent">Electricity duty (%)</label><input id="electricityDutyPercent" type="number" min="0" step="0.01" data-setting></div>
+            <div class="field"><label for="wheelingChargePerKwh">Wheeling (₹ / kWh)</label><input id="wheelingChargePerKwh" type="number" min="0" step="0.01" data-setting></div>
+            <div class="field"><label for="otherCharges">Other charges (₹ / cycle)</label><input id="otherCharges" type="number" min="0" step="0.01" data-setting></div>
+          </div>
+          <h2 class="section-title">Targets and cost limits</h2>
+          <div class="form-row">
+            <div class="field"><label for="dailyCostLimit">Daily cost limit (₹)</label><input id="dailyCostLimit" type="number" min="0" step="0.01" data-setting></div>
+            <div class="field"><label for="monthlyCostLimit">Period budget (₹)</label><input id="monthlyCostLimit" type="number" min="0" step="0.01" data-setting></div>
+            <div class="field"><label for="dailyEnergyLimit">Daily energy limit (kWh)</label><input id="dailyEnergyLimit" type="number" min="0" step="0.01" data-setting></div>
+            <div class="field"><label for="consumptionTargetKwh">Daily consumption target (kWh)</label><input id="consumptionTargetKwh" type="number" min="0" step="0.01" data-setting></div>
+          </div>
+          <h2 class="section-title">Electrical thresholds</h2>
+          <div class="form-row">
+            <div class="field"><label for="minVoltage">Under-voltage threshold (V)</label><input id="minVoltage" type="number" min="0" step="0.1" data-setting></div>
+            <div class="field"><label for="maxVoltage">Over-voltage threshold (V)</label><input id="maxVoltage" type="number" min="0" step="0.1" data-setting></div>
+            <div class="field"><label for="maxCurrent">Over-current threshold (A)</label><input id="maxCurrent" type="number" min="0" step="0.01" data-setting></div>
+            <div class="field"><label for="maxPower">Over-power threshold (W)</label><input id="maxPower" type="number" min="0" step="0.1" data-setting></div>
+            <div class="field"><label for="standbyPowerThreshold">Standby power threshold (W)</label><input id="standbyPowerThreshold" type="number" min="0" step="0.1" data-setting></div>
+            <div class="field"><label for="minPowerFactor">Low power-factor threshold (0-1)</label><input id="minPowerFactor" type="number" min="0" max="1" step="0.01" data-setting></div>
+            <div class="field checkbox-field"><label><input id="alertsEnabled" type="checkbox"> Enable alerts</label></div>
+          </div>
+          <button class="btn" type="submit">Save billing & alert settings</button><p id="settingsMsg" class="status-text"></p>
+        </form>
+      </section>
+    </main>
+  </div>
+  <div id="toast" class="toast"></div>
+  <script src="/js/common.js"></script>
+  <script src="/js/admin.js"></script>
+</body>
+</html>

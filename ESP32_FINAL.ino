@@ -31,14 +31,19 @@
 PZEM004Tv30 pzem(Serial2, PZEM_RX_PIN, PZEM_TX_PIN);
 Preferences prefs;
 
-String serverBase = "http://10.165.80.203:5000";
-String meterId = "MTR001";
+String serverBase = "";
+String meterId = "";
 
 bool relayState = false;
 unsigned long updateFrequency = 5;
 unsigned long lastDataSend = 0;
 unsigned long lastCommandPoll = 0;
 unsigned long lastSettingsPoll = 0;
+
+String jsonNumber(float value, int decimals) {
+  if (!isfinite(value)) return "null";
+  return String(value, decimals);
+}
 
 String extractString(String body, String key) {
   String pattern = "\"" + key + "\"";
@@ -73,7 +78,7 @@ void applyRelay(bool on) {
 }
 
 void pollCommand() {
-  if (WiFi.status() != WL_CONNECTED) return;
+  if (WiFi.status() != WL_CONNECTED || serverBase.length() == 0 || meterId.length() == 0) return;
 
   HTTPClient http;
   String url = serverBase + "/api/meter/" + meterId + "/command";
@@ -91,7 +96,7 @@ void pollCommand() {
 }
 
 void pollSettings() {
-  if (WiFi.status() != WL_CONNECTED) return;
+  if (WiFi.status() != WL_CONNECTED || serverBase.length() == 0 || meterId.length() == 0) return;
 
   HTTPClient http;
   String url = serverBase + "/api/meter/" + meterId + "/settings";
@@ -110,7 +115,7 @@ void pollSettings() {
 }
 
 void sendMeterData() {
-  if (WiFi.status() != WL_CONNECTED) return;
+  if (WiFi.status() != WL_CONNECTED || serverBase.length() == 0 || meterId.length() == 0) return;
 
   float voltage = pzem.voltage();
   float current = pzem.current();
@@ -118,13 +123,6 @@ void sendMeterData() {
   float energy = pzem.energy();
   float frequency = pzem.frequency();
   float pf = pzem.pf();
-
-  if (isnan(voltage)) voltage = 0;
-  if (isnan(current)) current = 0;
-  if (isnan(power)) power = 0;
-  if (isnan(energy)) energy = 0;
-  if (isnan(frequency)) frequency = 0;
-  if (isnan(pf)) pf = 0;
 
   Serial.println("\n-----------------------------");
   Serial.printf("Voltage: %.2f V\n", voltage);
@@ -143,12 +141,12 @@ void sendMeterData() {
 
   String json = "{";
   json += "\"meterId\":\"" + meterId + "\",";
-  json += "\"voltage\":" + String(voltage, 2) + ",";
-  json += "\"current\":" + String(current, 3) + ",";
-  json += "\"power\":" + String(power, 2) + ",";
-  json += "\"energy\":" + String(energy, 4) + ",";
-  json += "\"frequency\":" + String(frequency, 2) + ",";
-  json += "\"powerFactor\":" + String(pf, 2) + ",";
+  json += "\"voltage\":" + jsonNumber(voltage, 2) + ",";
+  json += "\"current\":" + jsonNumber(current, 3) + ",";
+  json += "\"power\":" + jsonNumber(power, 2) + ",";
+  json += "\"energy\":" + jsonNumber(energy, 4) + ",";
+  json += "\"frequency\":" + jsonNumber(frequency, 2) + ",";
+  json += "\"powerFactor\":" + jsonNumber(pf, 2) + ",";
   json += "\"status\":\"" + String(relayState ? "ON" : "OFF") + "\"";
   json += "}";
 
@@ -197,7 +195,7 @@ void setup() {
   // The portal scans nearby networks so the user can select the hotspot and enter its password.
   wm.setConfigPortalTimeout(300);
   wm.setAPCallback([](WiFiManager* manager) {
-    Serial.println("WiFi setup portal started: connect to the MTR001-SETUP network and open 192.168.4.1");
+    Serial.println("WiFi setup portal started: connect to ENERGY-METER-SETUP and open 192.168.4.1");
   });
   wm.setTitle("SPO Energy Meter - WiFi Setup");
   WiFiManagerParameter serverParam("server", "Node.js Server URL", serverBase.c_str(), 100);
@@ -206,8 +204,12 @@ void setup() {
   wm.addParameter(&meterParam);
 
   Serial.println("Connecting WiFi...");
+  Serial.println("Set the Node.js server URL and meter ID in the WiFi setup portal.");
   Serial.println("If saved WiFi cannot be connected, the ESP32 will automatically open the WiFi setup portal.");
-  if (!wm.autoConnect((meterId + "-SETUP").c_str())) {
+  bool connected = serverBase.length() == 0 || meterId.length() == 0
+    ? wm.startConfigPortal("ENERGY-METER-SETUP")
+    : wm.autoConnect("ENERGY-METER-SETUP");
+  if (!connected) {
     Serial.println("WiFi setup failed. Restarting...");
     delay(3000);
     ESP.restart();

@@ -1,1 +1,105 @@
-<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>User Dashboard | Energy Meter</title><link rel="stylesheet" href="/css/style.css"><script src="https://cdn.jsdelivr.net/npm/chart.js"></script></head><body><header class="topbar"><div class="brand">Energy <span>Meter</span> / User</div><div class="userbox"><span id="userName"></span><button class="btn small secondary" onclick="logout()">Logout</button></div></header><main class="main"><div class="toolbar"><div><h1 class="page-title">My Energy Dashboard</h1><p class="muted">Only meters assigned to your account are shown.</p></div><select id="meterSelect" style="min-width:220px"></select></div><div id="noMeter" class="panel" style="display:none">No meter has been assigned to your account yet. Please ask the admin to assign one.</div><div id="meterArea"><div class="grid cards"><div class="card"><div class="label">Connection</div><div class="metric" id="online">OFFLINE</div></div><div class="card"><div class="label">Voltage</div><div class="metric" id="voltage">0 V</div></div><div class="card"><div class="label">Current</div><div class="metric" id="current">0 A</div></div><div class="card"><div class="label">Power</div><div class="metric" id="power">0 W</div></div></div><div class="grid cards"><div class="card"><div class="label">Meter energy</div><div class="metric" id="energy">0 kWh</div></div><div class="card"><div class="label">Today consumption</div><div class="metric" id="todayKwh">0 kWh</div><div id="todayCost" class="status-text">₹0</div></div><div class="card"><div class="label">This month</div><div class="metric" id="monthKwh">0 kWh</div><div id="monthCost" class="status-text">₹0</div></div><div class="card"><div class="label">Current tariff slab</div><div class="metric" id="slab">-</div><div id="rate" class="status-text">-</div></div></div><div class="panel"><div class="toolbar"><div><b>Relay control</b><div class="status-text">Command reaches ESP32 within about 1 second when network is healthy.</div></div><div class="actions"><button class="btn success" onclick="setCommand('ON')">TURN ON</button><button class="btn danger" onclick="setCommand('OFF')">TURN OFF</button></div></div><div id="relayStatus" class="status-text">Relay: -</div></div><div class="grid two" style="margin-top:16px"><div class="panel"><b>Daily consumption</b><div class="chart-box"><canvas id="dailyChart"></canvas></div></div><div class="panel"><b>Monthly consumption</b><div class="chart-box"><canvas id="monthlyChart"></canvas></div></div></div><div class="panel" style="margin-top:16px"><div class="toolbar"><b>Daily consumption table</b><select id="daysSelect"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option></select></div><div class="table-wrap"><table class="table"><thead><tr><th>Date</th><th>kWh</th><th>Estimated cost</th><th>Samples</th></tr></thead><tbody id="consTable"></tbody></table></div></div></div><div id="toast" class="toast"></div><script src="/js/common.js"></script><script src="/js/user.js"></script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Energy Dashboard | Smart Energy Meter</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Energy <span>Meter</span> / User</div>
+    <div class="userbox"><span id="userName"></span><button class="btn small secondary" onclick="logout()">Logout</button></div>
+  </header>
+  <main class="main">
+    <div class="toolbar">
+      <div><h1 class="page-title">My Energy Dashboard</h1><p class="muted">Live costs and readings are shown only when meter data is available.</p></div>
+      <select id="meterSelect" aria-label="Select meter"></select>
+    </div>
+    <div id="noMeter" class="panel" style="display:none">No meter has been assigned to your account yet. Please ask the admin to assign one.</div>
+    <div id="meterArea">
+      <section aria-labelledby="costHeading">
+        <h2 id="costHeading" class="section-title">Electricity cost</h2>
+        <div class="grid cards">
+          <div class="card cost-primary"><div class="label">Live running cost / hour</div><div class="metric" id="costPerHour">--</div><div id="avgCostPerHour" class="status-text">Today's average: --</div></div>
+          <div class="card"><div class="label">Today's cost</div><div class="metric" id="todayCost">--</div><div id="dayCostCompare" class="status-text">Yesterday: --</div></div>
+          <div class="card"><div class="label">Current billing-period cost</div><div class="metric" id="monthCost">--</div><div id="monthCostCompare" class="status-text">Previous period: --</div><div id="calendarMonthCompare" class="status-text">Calendar month: --</div></div>
+          <div class="card"><div class="label">Expected period-end bill</div><div class="metric" id="expectedBill">--</div><div id="billingPeriod" class="status-text">Billing period: --</div></div>
+        </div>
+        <div class="grid two">
+          <div class="card"><div class="label">Monthly budget vs actual</div><div class="metric" id="budgetUsage">--</div><div id="budgetDetail" class="status-text">Set by your administrator</div></div>
+          <div class="card"><div class="label">Current slab / energy charge</div><div class="metric" id="slab">--</div><div id="rate" class="status-text">--</div><div id="mostExpensiveHour" class="status-text">Peak cost hour: --</div></div>
+        </div>
+        <div class="panel" style="margin-top:16px">
+          <div class="toolbar"><b>Bill estimate breakdown</b><span id="billTotal" class="metric compact">--</span></div>
+          <div class="grid three billing-breakdown">
+            <div>Energy charges <b id="energyCharges">--</b></div><div>FAC <b id="facCharge">--</b></div>
+            <div>Electricity duty <b id="dutyCharge">--</b></div><div>Wheeling charges <b id="wheelingCharge">--</b></div>
+            <div>Fixed charges <b id="fixedCharge">--</b></div><div>Other charges <b id="otherCharge">--</b></div>
+          </div>
+          <p class="status-text">Estimate from administrator-configured tariff and charges; your utility bill may include additional adjustments.</p>
+        </div>
+      </section>
+
+      <section aria-labelledby="unitsHeading">
+        <h2 id="unitsHeading" class="section-title">Energy used</h2>
+        <div class="grid cards">
+          <div class="card"><div class="label">Today</div><div class="metric" id="todayKwh">--</div></div>
+          <div class="card"><div class="label">Yesterday</div><div class="metric" id="yesterdayKwh">--</div></div>
+          <div class="card"><div class="label">This billing period</div><div class="metric" id="monthKwh">--</div></div>
+          <div class="card"><div class="label">Peak power</div><div class="metric" id="peakPower">--</div><div id="peakPowerAt" class="status-text">--</div></div>
+        </div>
+      </section>
+
+      <section class="grid two" aria-label="Saving and system alerts">
+        <div class="panel">
+          <h2 class="section-title">Saving suggestions</h2>
+          <p class="status-text" id="targetProgress">Consumption target: --</p>
+          <ul id="suggestionsList" class="insight-list"><li>No suggestions available until meter readings arrive.</li></ul>
+        </div>
+        <div class="panel">
+          <h2 class="section-title">Alerts</h2>
+          <div id="alertsList" class="alert-list"><span class="muted">No alert data available.</span></div>
+        </div>
+      </section>
+
+      <section aria-label="Consumption analytics">
+        <h2 class="section-title">Usage trends</h2>
+        <div class="grid two">
+          <div class="panel"><b>Hourly usage today (kWh)</b><div class="chart-box"><canvas id="hourlyChart"></canvas></div></div>
+          <div class="panel"><div class="toolbar"><b>Daily usage (kWh)</b><select id="daysSelect" aria-label="History period"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option></select></div><div class="chart-box"><canvas id="dailyChart"></canvas></div></div>
+          <div class="panel"><b>Monthly usage (kWh)</b><div class="chart-box"><canvas id="monthlyChart"></canvas></div></div>
+          <div class="panel"><b>Weekly usage (kWh)</b><div class="chart-box"><canvas id="weeklyChart"></canvas></div></div>
+        </div>
+      </section>
+
+      <section aria-label="Live system status and technical readings">
+        <h2 class="section-title">System status & technical readings</h2>
+        <div class="grid cards">
+          <div class="card"><div class="label">Connection</div><div class="metric" id="online">--</div><div id="lastReceived" class="status-text">Last data: --</div></div>
+          <div class="card"><div class="label">Voltage</div><div class="metric" id="voltage">--</div></div>
+          <div class="card"><div class="label">Current</div><div class="metric" id="current">--</div></div>
+          <div class="card"><div class="label">Power</div><div class="metric" id="power">--</div></div>
+          <div class="card"><div class="label">Meter energy</div><div class="metric" id="energy">--</div></div>
+          <div class="card"><div class="label">Power factor</div><div class="metric" id="powerFactor">--</div></div>
+          <div class="card"><div class="label">Frequency</div><div class="metric" id="frequency">--</div></div>
+          <div class="card"><div class="label">Sensor data</div><div class="metric" id="sensorStatus">--</div></div>
+        </div>
+      </section>
+
+      <div class="panel">
+        <div class="toolbar"><div><b>Relay control</b><div class="status-text">The ESP32 applies commands when it can reach the server.</div></div><div class="actions"><button class="btn success" onclick="setCommand('ON')">TURN ON</button><button class="btn danger" onclick="setCommand('OFF')">TURN OFF</button></div></div>
+        <div id="relayStatus" class="status-text">Relay: --</div>
+      </div>
+      <div class="panel">
+        <div class="toolbar"><b>Daily usage history</b></div>
+        <div class="table-wrap"><table class="table"><thead><tr><th>Date</th><th>kWh</th><th>Estimated cost</th><th>Samples</th></tr></thead><tbody id="consTable"></tbody></table></div>
+      </div>
+    </div>
+  </main>
+  <div id="toast" class="toast"></div>
+  <script src="/js/common.js"></script>
+  <script src="/js/user.js"></script>
+</body>
+</html>

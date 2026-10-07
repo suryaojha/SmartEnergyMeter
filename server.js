@@ -12,11 +12,13 @@ const User = require("./models/User");
 const Meter = require("./models/Meter");
 const Reading = require("./models/Reading");
 const TariffSlab = require("./models/TariffSlab");
+const BillingSettings = require("./models/BillingSettings");
 const { auth, adminOnly } = require("./middleware/auth");
 
 const app = express();
 const PORT = Number(process.env.PORT || 5000);
-const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) throw new Error("JWT_SECRET must be configured in the environment.");
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -48,45 +50,75 @@ function addIndiaDays(date, days) {
   return new Date(date.getTime() + days * 86400000);
 }
 
+function indiaMonthStart(date, day = 1, monthOffset = 0) {
+  const parts = date.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }).split("-").map(Number);
+  const monthDate = new Date(Date.UTC(parts[0], parts[1] - 1 + monthOffset, 1));
+  const year = monthDate.getUTCFullYear();
+  const month = String(monthDate.getUTCMonth() + 1).padStart(2, "0");
+  return new Date(`${year}-${month}-${String(day).padStart(2, "0")}T00:00:00+05:30`);
+}
+
+function billingPeriod(date, startDay) {
+  const dayOfMonth = Number(date.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }).slice(-2));
+  const offset = dayOfMonth >= startDay ? 0 : -1;
+  const start = indiaMonthStart(date, startDay, offset);
+  const previousStart = indiaMonthStart(date, startDay, offset - 1);
+  const end = indiaMonthStart(date, startDay, offset + 1);
+  return { start, end, previousStart, previousEnd: new Date(previousStart.getTime() + (date.getTime() - start.getTime())) };
+}
+
+function counterUsage(firstValue, lastValue, maximumValue, samples = 2) {
+  if (samples < 2) return null;
+  const first = Number(firstValue);
+  const last = Number(lastValue);
+  if (!Number.isFinite(first) || !Number.isFinite(last)) return 0;
+  return Math.max(0, last >= first ? last - first : Number(maximumValue || last));
+}
+
+function sumMeasured(rows) {
+  const measured = rows.filter(row => row.kwh != null && Number.isFinite(Number(row.kwh)));
+  return measured.length ? measured.reduce((sum, row) => sum + Number(row.kwh), 0) : null;
+}
+
 async function consumptionFor(meterId, start, end) {
   const rows = await Reading.aggregate([
-    { $match: { meterId, createdAt: { $gte: start, $lt: end } } },
+    { $match: { meterId, energy: { $type: "number" }, createdAt: { $gte: start, $lt: end } } },
+    { $sort: { createdAt: 1 } },
     { $group: {
       _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt", timezone: "Asia/Kolkata" } },
       firstEnergy: { $first: "$energy" },
       lastEnergy: { $last: "$energy" },
-      minEnergy: { $min: "$energy" },
       maxEnergy: { $max: "$energy" },
       samples: { $sum: 1 }
     }},
     { $sort: { _id: 1 } }
   ]);
-
   return rows.map(r => {
-    const first = Number(r.firstEnergy ?? 0);
-    const last = Number(r.lastEnergy ?? 0);
-    const min = Number(r.minEnergy ?? 0);
-    const max = Number(r.maxEnergy ?? 0);
-    const used = Math.max(0, Math.max(last - first, max - min));
-    return { date: r._id, kwh: Number(used.toFixed(4)), samples: r.samples };
+    const used = counterUsage(r.firstEnergy, r.lastEnergy, r.maxEnergy, r.samples);
+    return { date: r._id, kwh: used == null ? null : Number(used.toFixed(4)), samples: r.samples };
   });
 }
 
 async function periodConsumption(meterId, start, end) {
   const r = await Reading.aggregate([
-    { $match: { meterId, createdAt: { $gte: start, $lt: end } } },
+    { $match: { meterId, energy: { $type: "number" }, createdAt: { $gte: start, $lt: end } } },
+    { $sort: { createdAt: 1 } },
     { $group: {
       _id: null,
-      first: { $min: "$energy" },
-      last: { $max: "$energy" }
+      first: { $first: "$energy" },
+      last: { $last: "$energy" },
+      maximum: { $max: "$energy" },
+      samples: { $sum: 1 }
     }}
   ]);
-  if (!r.length) return 0;
-  return Math.max(0, Number(r[0].last || 0) - Number(r[0].first || 0));
+  if (!r.length) return null;
+  return counterUsage(r[0].first, r[0].last, r[0].maximum, r[0].samples);
 }
 
-function calculateBill(kwh, slabs) {
-  let total = 0;
+function calculateBill(kwh, slabs, settings = {}, includeCycleCharges = false) {
+  if (kwh == null || !Number.isFinite(Number(kwh))) return { kwh: null, cost: null, energyCharges: null, currentSlab: null };
+  if (!slabs.length) return { kwh: Number(kwh.toFixed(4)), cost: null, energyCharges: null, currentSlab: null };
+  let energyCharges = 0;
   let currentSlab = null;
   const sorted = [...slabs].sort((a, b) => a.minKwh - b.minKwh);
 
@@ -94,13 +126,25 @@ function calculateBill(kwh, slabs) {
     const min = Number(s.minKwh);
     const max = s.maxKwh === null || s.maxKwh === undefined ? Infinity : Number(s.maxKwh);
     const units = Math.max(0, Math.min(kwh, max) - min);
-    if (units > 0) total += units * Number(s.ratePerKwh);
+    if (units > 0) energyCharges += units * Number(s.ratePerKwh);
     if (kwh >= min && kwh <= max) currentSlab = s;
   }
 
+  const fac = kwh * Number(settings.facPerKwh || 0);
+  const wheeling = kwh * Number(settings.wheelingChargePerKwh || 0);
+  const duty = (energyCharges + fac) * Number(settings.electricityDutyPercent || 0) / 100;
+  const fixed = includeCycleCharges ? Number(settings.fixedCharge || 0) : 0;
+  const other = includeCycleCharges ? Number(settings.otherCharges || 0) : 0;
+  const total = energyCharges + fac + wheeling + duty + fixed + other;
   return {
     kwh: Number(kwh.toFixed(4)),
     cost: Number(total.toFixed(2)),
+    energyCharges: Number(energyCharges.toFixed(2)),
+    fac: Number(fac.toFixed(2)),
+    electricityDuty: Number(duty.toFixed(2)),
+    wheelingCharges: Number(wheeling.toFixed(2)),
+    fixedCharges: Number(fixed.toFixed(2)),
+    otherCharges: Number(other.toFixed(2)),
     currentSlab: currentSlab ? {
       name: currentSlab.name,
       minKwh: currentSlab.minKwh,
@@ -110,14 +154,34 @@ function calculateBill(kwh, slabs) {
   };
 }
 
-async function getMonthlyBill(meterId) {
-  const start = indiaStart();
-  const end = addIndiaDays(start, 1);
-  const monthStart = new Date(start);
-  monthStart.setUTCMonth(monthStart.getUTCMonth() - 1); // safe enough for rolling monthly demo
-  const kwh = await periodConsumption(meterId, monthStart, new Date());
-  const slabs = await TariffSlab.find().sort({ minKwh: 1 }).lean();
-  return calculateBill(kwh, slabs);
+function billDifference(currentKwh, previousKwh, periodKwh, slabs, settings) {
+  if (currentKwh == null || previousKwh == null) return calculateBill(null, slabs, settings);
+  const current = calculateBill(currentKwh, slabs, settings);
+  const previous = calculateBill(previousKwh, slabs, settings);
+  if (current.cost == null || previous.cost == null) return calculateBill(null, slabs, settings);
+  const subtract = (field) => Number(Math.max(0, current[field] - previous[field]).toFixed(2));
+  return {
+    ...current,
+    kwh: periodKwh == null ? null : Number(periodKwh.toFixed(4)),
+    cost: subtract("cost"),
+    energyCharges: subtract("energyCharges"),
+    fac: subtract("fac"),
+    electricityDuty: subtract("electricityDuty"),
+    wheelingCharges: subtract("wheelingCharges")
+  };
+}
+
+function liveHourlyCost(power, cumulativeKwh, slabs, settings) {
+  if (power == null || !slabs.length) return null;
+  const cumulative = Number(cumulativeKwh || 0);
+  const slab = [...slabs].sort((a, b) => a.minKwh - b.minKwh)
+    .find(item => cumulative >= item.minKwh && (item.maxKwh == null || cumulative <= item.maxKwh));
+  const usageKwh = Math.max(0, Number(power)) / 1000;
+  const energyCharge = usageKwh * Number((slab || slabs[0]).ratePerKwh);
+  const fac = usageKwh * Number(settings.facPerKwh || 0);
+  const wheeling = usageKwh * Number(settings.wheelingChargePerKwh || 0);
+  const duty = (energyCharge + fac) * Number(settings.electricityDutyPercent || 0) / 100;
+  return Number((energyCharge + fac + wheeling + duty).toFixed(2));
 }
 
 async function sendResetEmail(user, resetLink) {
@@ -144,40 +208,42 @@ app.get("/api/health", (req, res) => res.json({ ok: true, time: new Date() }));
 // ---------- ESP32 public device APIs ----------
 app.post("/api/meter/data", async (req, res) => {
   try {
-    const {
-      meterId, voltage = 0, current = 0, power = 0, energy = 0,
-      frequency = 0, powerFactor = 0, status = "OFF"
-    } = req.body;
-    if (!meterId) return res.status(400).json({ message: "meterId required" });
+    const { meterId, status = "OFF" } = req.body;
+    if (typeof meterId !== "string" || !/^[A-Za-z0-9_-]{1,40}$/.test(meterId)) {
+      return res.status(400).json({ message: "meterId must contain 1 to 40 letters, numbers, underscores or hyphens" });
+    }
+    const fields = ["voltage", "current", "power", "energy", "frequency", "powerFactor"];
+    const readings = {};
+    for (const field of fields) {
+      const value = req.body[field];
+      if (value === undefined || value === null) {
+        readings[field] = null;
+      } else if (typeof value === "number" && Number.isFinite(value)) {
+        readings[field] = value;
+      } else {
+        return res.status(400).json({ message: `${field} must be a finite number or null` });
+      }
+    }
+    if (!["ON", "OFF"].includes(status)) return res.status(400).json({ message: "status must be ON or OFF" });
 
     const id = String(meterId).toUpperCase();
     const meter = await Meter.findOneAndUpdate(
       { meterId: id },
       {
         $set: {
-          voltage: Number(voltage) || 0,
-          current: Number(current) || 0,
-          power: Number(power) || 0,
-          energy: Number(energy) || 0,
-          frequency: Number(frequency) || 0,
-          powerFactor: Number(powerFactor) || 0,
-          status: status === "ON" ? "ON" : "OFF",
+          ...readings,
+          status,
           lastSeen: new Date()
-        },
-        $setOnInsert: { meterId: id }
+        }
       },
-      { upsert: true, new: true }
+      { new: true }
     );
+    if (!meter) return res.status(404).json({ message: "Meter is not registered; ask the administrator to add it first" });
 
     await Reading.create({
       meterId: id,
-      voltage: Number(voltage) || 0,
-      current: Number(current) || 0,
-      power: Number(power) || 0,
-      energy: Number(energy) || 0,
-      frequency: Number(frequency) || 0,
-      powerFactor: Number(powerFactor) || 0,
-      status: meter.command
+      ...readings,
+      status
     });
 
     res.json({
@@ -193,12 +259,14 @@ app.post("/api/meter/data", async (req, res) => {
 
 app.get("/api/meter/:meterId/command", async (req, res) => {
   const meter = await Meter.findOne({ meterId: req.params.meterId.toUpperCase() }).lean();
-  res.json({ command: meter?.command || "OFF" });
+  if (!meter) return res.status(404).json({ message: "Meter not registered" });
+  res.json({ command: meter.command });
 });
 
 app.get("/api/meter/:meterId/settings", async (req, res) => {
   const meter = await Meter.findOne({ meterId: req.params.meterId.toUpperCase() }).lean();
-  res.json({ updateFrequency: Math.max(1, Number(meter?.updateFrequency || 5)), command: meter?.command || "OFF" });
+  if (!meter) return res.status(404).json({ message: "Meter not registered" });
+  res.json({ updateFrequency: meter.updateFrequency, command: meter.command });
 });
 
 // ---------- Auth ----------
@@ -223,7 +291,7 @@ app.get("/api/auth/me", auth, (req, res) => {
   res.json({ user: { id: req.user._id, name: req.user.name, email: req.user.email, role: req.user.role } });
 });
 
-app.post("/api/auth/register", async (req, res) => {
+app.post("/api/auth/register", auth, adminOnly, async (req, res) => {
   try {
     const { name, email, password } = req.body;
     if (!name || !email || !password || password.length < 6) {
@@ -303,8 +371,8 @@ app.get("/api/admin/users", auth, adminOnly, async (req, res) => {
 });
 
 app.post("/api/admin/users", auth, adminOnly, async (req, res) => {
-  const { name, email, password = "User@123" } = req.body;
-  if (!name || !email) return res.status(400).json({ message: "Name and email required" });
+  const { name, email, password } = req.body;
+  if (!name || !email || !password || String(password).length < 6) return res.status(400).json({ message: "Name, email and password (6+ characters) are required" });
   const exists = await User.findOne({ email: String(email).toLowerCase().trim() });
   if (exists) return res.status(409).json({ message: "Email already exists" });
   const user = await User.create({
@@ -335,12 +403,19 @@ app.get("/api/admin/meters", auth, adminOnly, async (req, res) => {
 
 app.post("/api/admin/meters", auth, adminOnly, async (req, res) => {
   const meterId = String(req.body.meterId || "").trim().toUpperCase();
-  if (!meterId) return res.status(400).json({ message: "meterId required" });
+  if (!/^[A-Z0-9_-]{1,40}$/.test(meterId)) return res.status(400).json({ message: "Meter ID must contain 1 to 40 letters, numbers, underscores or hyphens" });
+  const meterName = String(req.body.meterName || "").trim();
+  if (meterName.length > 80) return res.status(400).json({ message: "Meter name must be 80 characters or fewer" });
   const exists = await Meter.findOne({ meterId });
   if (exists) return res.status(409).json({ message: "Meter already exists" });
+  const frequency = Number(req.body.updateFrequency ?? 5);
+  if (!Number.isInteger(frequency) || frequency < 1 || frequency > 3600) {
+    return res.status(400).json({ message: "Frequency must be 1 to 3600 seconds" });
+  }
   const meter = await Meter.create({
     meterId,
-    updateFrequency: Math.max(1, Math.min(3600, Number(req.body.updateFrequency || 5)))
+    meterName,
+    updateFrequency: frequency
   });
   res.status(201).json({ message: "Meter created", meter: publicMeter(meter) });
 });
@@ -365,6 +440,18 @@ app.put("/api/admin/meters/:meterId/frequency", auth, adminOnly, async (req, res
   const meter = await Meter.findOneAndUpdate({ meterId: req.params.meterId.toUpperCase() }, { updateFrequency: Math.floor(frequency) }, { new: true });
   if (!meter) return res.status(404).json({ message: "Meter not found" });
   res.json({ message: `Update frequency set to ${meter.updateFrequency} seconds`, meter: publicMeter(meter) });
+});
+
+app.put("/api/admin/meters/:meterId/config", auth, adminOnly, async (req, res) => {
+  const meterName = String(req.body.meterName || "").trim();
+  if (meterName.length > 80) return res.status(400).json({ message: "Meter name must be 80 characters or fewer" });
+  const meter = await Meter.findOneAndUpdate(
+    { meterId: req.params.meterId.toUpperCase() },
+    { meterName },
+    { new: true, runValidators: true }
+  ).populate("userId", "name email");
+  if (!meter) return res.status(404).json({ message: "Meter not found" });
+  res.json({ message: "Meter name saved", meter: publicMeter(meter) });
 });
 
 app.put("/api/admin/meters/:meterId/command", auth, adminOnly, async (req, res) => {
@@ -399,52 +486,177 @@ app.get("/api/meters/:meterId/consumption", auth, async (req, res) => {
     return res.status(403).json({ message: "Meter not assigned to you" });
   }
 
-  const days = Math.max(7, Math.min(365, Number(req.query.days || 30)));
+  const requestedDays = Number(req.query.days || 30);
+  const days = Number.isFinite(requestedDays) ? Math.max(7, Math.min(365, requestedDays)) : 30;
   const end = new Date();
   const start = new Date(end.getTime() - days * 86400000);
   const daily = await consumptionFor(meter.meterId, start, end);
+  const currentDayStart = indiaStart(end);
+  const currentDay = await consumptionFor(meter.meterId, currentDayStart, new Date(end.getTime() + 1));
+  const todayKwh = sumMeasured(currentDay);
+  const yesterdayStart = addIndiaDays(currentDayStart, -1);
+  const yesterdayRows = await consumptionFor(meter.meterId, yesterdayStart, currentDayStart);
+  const yesterdayKwh = sumMeasured(yesterdayRows);
 
-  const monthStart = new Date();
-  monthStart.setMonth(monthStart.getMonth() - 11);
-  monthStart.setDate(1);
-  monthStart.setHours(0, 0, 0, 0);
+  const monthStart = indiaMonthStart(end, 1, -11);
 
   const monthlyRows = await Reading.aggregate([
-    { $match: { meterId: meter.meterId, createdAt: { $gte: monthStart, $lte: end } } },
+    { $match: { meterId: meter.meterId, energy: { $type: "number" }, createdAt: { $gte: monthStart, $lte: end } } },
+    { $sort: { createdAt: 1 } },
     { $group: {
       _id: { $dateToString: { format: "%Y-%m", date: "$createdAt", timezone: "Asia/Kolkata" } },
-      firstEnergy: { $min: "$energy" },
-      lastEnergy: { $max: "$energy" },
+      firstEnergy: { $first: "$energy" },
+      lastEnergy: { $last: "$energy" },
+      maxEnergy: { $max: "$energy" },
       samples: { $sum: 1 }
     }},
     { $sort: { _id: 1 } }
   ]);
   const monthly = monthlyRows.map(r => ({
     month: r._id,
-    kwh: Number(Math.max(0, Number(r.lastEnergy || 0) - Number(r.firstEnergy || 0)).toFixed(4)),
+    kwh: counterUsage(r.firstEnergy, r.lastEnergy, r.maxEnergy, r.samples) == null ? null :
+      Number(counterUsage(r.firstEnergy, r.lastEnergy, r.maxEnergy, r.samples).toFixed(4)),
     samples: r.samples
   }));
 
   const slabs = await TariffSlab.find().sort({ minKwh: 1 }).lean();
-  const todayKwh = daily.reduce((s, x) => s + x.kwh, 0);
-  const periodKwh = daily.reduce((s, x) => s + x.kwh, 0);
-  const monthBeginning = new Date();
-  monthBeginning.setDate(1); monthBeginning.setHours(0,0,0,0);
-  const monthKwh = await periodConsumption(meter.meterId, monthBeginning, new Date());
+  const periodKwh = sumMeasured(daily);
+  const settings = await BillingSettings.findOne({ key: "default" }).lean() || {};
+  const { start: cycleStart, end: cycleEnd, previousStart, previousEnd } = billingPeriod(end, settings.billingCycleStartDay || 1);
+  const monthKwh = await periodConsumption(meter.meterId, cycleStart, end);
+  const previousMonthKwh = await periodConsumption(meter.meterId, previousStart, previousEnd);
+  const beforeTodayKwh = currentDayStart.getTime() === cycleStart.getTime()
+    ? 0
+    : await periodConsumption(meter.meterId, cycleStart, currentDayStart);
+  const yesterdayCycleStart = yesterdayStart < cycleStart ? previousStart : cycleStart;
+  const beforeYesterdayKwh = yesterdayStart.getTime() === yesterdayCycleStart.getTime()
+    ? 0
+    : await periodConsumption(meter.meterId, yesterdayCycleStart, yesterdayStart);
+  const throughYesterdayKwh = await periodConsumption(meter.meterId, yesterdayCycleStart, currentDayStart);
+  const calendarMonthStart = indiaMonthStart(end, 1, 0);
+  const previousCalendarMonthStart = indiaMonthStart(end, 1, -1);
+  const currentCalendarMonthKwh = await periodConsumption(meter.meterId, calendarMonthStart, end);
+  const previousCalendarMonthKwh = await periodConsumption(meter.meterId, previousCalendarMonthStart, calendarMonthStart);
+  const todayBill = billDifference(monthKwh, beforeTodayKwh, todayKwh, slabs, settings);
+  const monthBill = calculateBill(monthKwh, slabs, settings, true);
+  const yesterdayBill = billDifference(throughYesterdayKwh, beforeYesterdayKwh, yesterdayKwh, slabs, settings);
+  const previousMonthBill = calculateBill(previousMonthKwh, slabs, settings, true);
+  const currentCalendarMonthBill = calculateBill(currentCalendarMonthKwh, slabs, settings);
+  const previousCalendarMonthBill = calculateBill(previousCalendarMonthKwh, slabs, settings);
+
+  const hourlyRows = await Reading.aggregate([
+    { $match: { meterId: meter.meterId, energy: { $type: "number" }, createdAt: { $gte: currentDayStart, $lte: end } } },
+    { $sort: { createdAt: 1 } },
+    { $group: {
+      _id: { $dateToString: { format: "%H", date: "$createdAt", timezone: "Asia/Kolkata" } },
+      firstEnergy: { $first: "$energy" },
+      lastEnergy: { $last: "$energy" },
+      maxEnergy: { $max: "$energy" },
+      maxPower: { $max: "$power" },
+      samples: { $sum: 1 }
+    }},
+    { $sort: { _id: 1 } }
+  ]);
+  const hourly = hourlyRows.map(row => {
+    const usage = counterUsage(row.firstEnergy, row.lastEnergy, row.maxEnergy, row.samples);
+    const kwh = usage == null ? null : Number(usage.toFixed(4));
+    return { hour: row._id, kwh, cost: calculateBill(kwh, slabs, settings).cost, maxPower: row.maxPower ?? null, samples: row.samples };
+  });
+
+  const weekStart = addIndiaDays(currentDayStart, -6);
+  const weeklyRows = await consumptionFor(meter.meterId, weekStart, end);
+  const weekly = [];
+  for (let offset = 0; offset < 7; offset++) {
+    const day = addIndiaDays(weekStart, offset);
+    const date = day.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+    const entry = weeklyRows.find(row => row.date === date);
+    weekly.push({ date, kwh: entry?.kwh ?? null, samples: entry?.samples ?? 0 });
+  }
+
+  const peakReading = await Reading.findOne({
+    meterId: meter.meterId, power: { $type: "number" }, createdAt: { $gte: start, $lte: end }
+  }).sort({ power: -1 }).select("power createdAt").lean();
+  const recentReadings = await Reading.find({ meterId: meter.meterId, power: { $type: "number" } })
+    .sort({ createdAt: -1 }).limit(2).select("power createdAt").lean();
+  const priorDaily = daily.slice(-8, -1).filter(row => row.kwh != null);
+  const averageDailyKwh = priorDaily.length ? priorDaily.reduce((sum, row) => sum + row.kwh, 0) / priorDaily.length : null;
+  const alerts = [];
+  const meterOnline = online(meter);
+  const available = {
+    voltage: meter.voltage !== null && meter.voltage !== undefined,
+    current: meter.current !== null && meter.current !== undefined,
+    power: meter.power !== null && meter.power !== undefined,
+    energy: meter.energy !== null && meter.energy !== undefined,
+    frequency: meter.frequency !== null && meter.frequency !== undefined,
+    powerFactor: meter.powerFactor !== null && meter.powerFactor !== undefined
+  };
+  if (settings.alertsEnabled !== false) {
+    if (!meterOnline) alerts.push({ type: "offline", severity: "high", message: "Meter / ESP32 is offline; no recent data received." });
+    else {
+      if (meter.voltage != null && settings.maxVoltage != null && meter.voltage > settings.maxVoltage) alerts.push({ type: "over-voltage", severity: "high", message: `Voltage is above ${settings.maxVoltage} V.` });
+      if (meter.voltage != null && settings.minVoltage != null && meter.voltage < settings.minVoltage) alerts.push({ type: "under-voltage", severity: "high", message: `Voltage is below ${settings.minVoltage} V.` });
+      if (meter.current != null && settings.maxCurrent != null && meter.current > settings.maxCurrent) alerts.push({ type: "over-current", severity: "high", message: `Current is above ${settings.maxCurrent} A.` });
+      if (meter.power != null && settings.maxPower != null && meter.power > settings.maxPower) alerts.push({ type: "over-power", severity: "high", message: `Power is above ${settings.maxPower} W.` });
+      if (meter.power != null && settings.standbyPowerThreshold != null && meter.power > 0 && meter.power <= settings.standbyPowerThreshold) alerts.push({ type: "standby-power", severity: "low", message: `Power is within the configured standby range (up to ${settings.standbyPowerThreshold} W).` });
+      if (meter.powerFactor != null && settings.minPowerFactor != null && meter.powerFactor < settings.minPowerFactor) alerts.push({ type: "low-power-factor", severity: "medium", message: `Power factor is below ${settings.minPowerFactor}.` });
+      if (recentReadings.length === 2 && recentReadings[1].power > 0 && recentReadings[0].power >= recentReadings[1].power * 2) alerts.push({ type: "power-spike", severity: "medium", message: "A sudden power increase was detected." });
+    }
+    if (settings.dailyEnergyLimit != null && todayKwh != null && todayKwh > settings.dailyEnergyLimit) alerts.push({ type: "high-energy", severity: "medium", message: "Daily energy limit exceeded." });
+    if (todayBill.cost != null && settings.dailyCostLimit != null && todayBill.cost > settings.dailyCostLimit) alerts.push({ type: "high-daily-cost", severity: "medium", message: "Daily cost limit exceeded." });
+    if (monthBill.cost != null && settings.monthlyCostLimit != null && monthBill.cost > settings.monthlyCostLimit) alerts.push({ type: "high-monthly-cost", severity: "high", message: "Monthly cost limit exceeded." });
+    if (monthBill.cost != null && monthBill.cost > 0 && settings.monthlyCostLimit != null && monthBill.cost >= settings.monthlyCostLimit * 0.8 && monthBill.cost <= settings.monthlyCostLimit) alerts.push({ type: "budget-warning", severity: "medium", message: "Monthly budget is at least 80% used." });
+    if (averageDailyKwh != null && todayKwh != null && todayKwh > averageDailyKwh * 1.5 && todayKwh > 0) alerts.push({ type: "abnormal-consumption", severity: "medium", message: "Today's usage is unusually high compared with the recent daily average." });
+  }
+
+  const elapsedDays = Math.max(1, Math.ceil((end.getTime() - cycleStart.getTime()) / 86400000));
+  const cycleLengthDays = Math.max(1, Math.ceil((cycleEnd.getTime() - cycleStart.getTime()) / 86400000));
+  const recurringCharges = monthBill.cost == null ? 0 : monthBill.fixedCharges + monthBill.otherCharges;
+  const expectedBill = monthBill.cost == null ? null :
+    Number(((monthBill.cost - recurringCharges) * cycleLengthDays / elapsedDays + recurringCharges).toFixed(2));
+  const mostExpensiveHour = hourly.reduce((best, row) => row.cost != null && (!best || row.cost > best.cost) ? row : best, null);
+  const suggestions = [];
+  if (alerts.some(alert => ["abnormal-consumption", "power-spike"].includes(alert.type))) suggestions.push("Check recently switched-on appliances for unexpected or standby load.");
+  if (mostExpensiveHour && mostExpensiveHour.cost > 0) suggestions.push(`Shift flexible appliance use away from ${mostExpensiveHour.hour}:00, your highest-cost hour today.`);
+  if (settings.consumptionTargetKwh != null && todayKwh != null && todayKwh > settings.consumptionTargetKwh) suggestions.push("Today's energy target has been exceeded; reduce non-essential loads.");
 
   res.json({
     meter: publicMeter(meter),
     daily,
     monthly,
-    table: [...daily].reverse(),
+    weekly,
+    hourly,
+    table: [...daily].reverse().map(row => ({ ...row, bill: calculateBill(row.kwh, slabs, settings) })),
     summary: {
-      todayKwh: Number(todayKwh.toFixed(4)),
-      selectedPeriodKwh: Number(periodKwh.toFixed(4)),
-      monthKwh: Number(monthKwh.toFixed(4)),
-      todayBill: calculateBill(todayKwh, slabs),
-      monthBill: calculateBill(monthKwh, slabs)
+      todayKwh: todayKwh == null ? null : Number(todayKwh.toFixed(4)),
+      selectedPeriodKwh: periodKwh == null ? null : Number(periodKwh.toFixed(4)),
+      monthKwh: monthKwh == null ? null : Number(monthKwh.toFixed(4)),
+      yesterdayKwh: yesterdayKwh == null ? null : Number(yesterdayKwh.toFixed(4)),
+      previousMonthKwh: previousMonthKwh == null ? null : Number(previousMonthKwh.toFixed(4)),
+      todayBill,
+      yesterdayBill,
+      monthBill,
+      previousMonthBill,
+      currentCalendarMonthBill,
+      previousCalendarMonthBill,
+      expectedBill,
+      costPerHour: liveHourlyCost(meter.power, monthKwh, slabs, settings),
+      todayAverageCostPerHour: todayBill.cost == null ? null : Number((todayBill.cost / Math.max(1, (end.getTime() - currentDayStart.getTime()) / 3600000)).toFixed(2)),
+      peakPower: peakReading ? { watts: peakReading.power, at: peakReading.createdAt } : null,
+      mostExpensiveHour: mostExpensiveHour ? `${mostExpensiveHour.hour}:00` : null,
+      averageDailyKwh: averageDailyKwh == null ? null : Number(averageDailyKwh.toFixed(4)),
+      billingPeriod: { start: cycleStart, end: cycleEnd },
+      budget: settings.monthlyCostLimit == null || monthBill.cost == null ? null : {
+        limit: settings.monthlyCostLimit,
+        usedPercent: settings.monthlyCostLimit === 0
+          ? (monthBill.cost === 0 ? 0 : null)
+          : Number((monthBill.cost / settings.monthlyCostLimit * 100).toFixed(1))
+      }
     },
-    slabs
+    slabs,
+    settings,
+    dataAvailability: available,
+    alerts,
+    suggestions
   });
 });
 
@@ -461,16 +673,78 @@ app.get("/api/admin/tariffs", auth, adminOnly, async (req, res) => {
   res.json(await TariffSlab.find().sort({ minKwh: 1 }).lean());
 });
 
+app.get("/api/admin/settings", auth, adminOnly, async (req, res) => {
+  const settings = await BillingSettings.findOneAndUpdate(
+    { key: "default" },
+    { $setOnInsert: { key: "default" } },
+    { new: true, upsert: true, setDefaultsOnInsert: true }
+  ).lean();
+  res.json(settings);
+});
+
+app.put("/api/admin/settings", auth, adminOnly, async (req, res) => {
+  const numericFields = [
+    "fixedCharge", "facPerKwh", "electricityDutyPercent", "wheelingChargePerKwh", "otherCharges",
+    "dailyCostLimit", "monthlyCostLimit", "dailyEnergyLimit", "consumptionTargetKwh",
+    "minVoltage", "maxVoltage", "maxCurrent", "maxPower", "standbyPowerThreshold", "minPowerFactor"
+  ];
+  const updates = {};
+  const billingCycleStartDay = Number(req.body.billingCycleStartDay);
+  if (!Number.isInteger(billingCycleStartDay) || billingCycleStartDay < 1 || billingCycleStartDay > 28) {
+    return res.status(400).json({ message: "Billing cycle start day must be 1 to 28" });
+  }
+  updates.billingCycleStartDay = billingCycleStartDay;
+  for (const field of numericFields) {
+    if (!(field in req.body)) continue;
+    const value = req.body[field];
+    if (value === "" || value === null) {
+      if (["dailyCostLimit", "monthlyCostLimit", "dailyEnergyLimit", "consumptionTargetKwh", "minVoltage", "maxVoltage", "maxCurrent", "maxPower", "standbyPowerThreshold", "minPowerFactor"].includes(field)) {
+        updates[field] = null;
+        continue;
+      }
+      return res.status(400).json({ message: `${field} is required` });
+    }
+    const number = Number(value);
+    if (!Number.isFinite(number) || number < 0 || (field === "minPowerFactor" && number > 1)) {
+      return res.status(400).json({ message: `${field} must be a valid non-negative number${field === "minPowerFactor" ? " no greater than 1" : ""}` });
+    }
+    updates[field] = number;
+  }
+  if (updates.electricityDutyPercent > 100) return res.status(400).json({ message: "Electricity duty must not exceed 100%" });
+  if (Object.prototype.hasOwnProperty.call(updates, "minVoltage") || Object.prototype.hasOwnProperty.call(updates, "maxVoltage")) {
+    const existing = await BillingSettings.findOne({ key: "default" }).lean();
+    const minimum = Object.prototype.hasOwnProperty.call(updates, "minVoltage") ? updates.minVoltage : existing?.minVoltage;
+    const maximum = Object.prototype.hasOwnProperty.call(updates, "maxVoltage") ? updates.maxVoltage : existing?.maxVoltage;
+    if (minimum != null && maximum != null && minimum >= maximum) {
+      return res.status(400).json({ message: "Under-voltage limit must be lower than over-voltage limit" });
+    }
+  }
+  if ("alertsEnabled" in req.body) {
+    if (typeof req.body.alertsEnabled !== "boolean") return res.status(400).json({ message: "alertsEnabled must be true or false" });
+    updates.alertsEnabled = req.body.alertsEnabled;
+  }
+  const settings = await BillingSettings.findOneAndUpdate(
+    { key: "default" },
+    { $set: updates, $setOnInsert: { key: "default" } },
+    { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true }
+  ).lean();
+  res.json({ message: "Billing and alert settings saved", settings });
+});
+
 app.put("/api/admin/tariffs", auth, adminOnly, async (req, res) => {
   if (!Array.isArray(req.body.slabs)) return res.status(400).json({ message: "slabs array required" });
   const slabs = req.body.slabs.map((s, i) => ({
-    name: s.name || `Slab ${i + 1}`,
-    minKwh: Math.max(0, Number(s.minKwh)),
-    maxKwh: s.maxKwh === "" || s.maxKwh === null || s.maxKwh === undefined ? null : Math.max(0, Number(s.maxKwh)),
-    ratePerKwh: Math.max(0, Number(s.ratePerKwh))
+    name: String(s.name ?? "").trim(),
+    minKwh: s.minKwh === "" || s.minKwh === null || s.minKwh === undefined ? null : Number(s.minKwh),
+    maxKwh: s.maxKwh === "" || s.maxKwh === null || s.maxKwh === undefined ? null : Number(s.maxKwh),
+    ratePerKwh: s.ratePerKwh === "" || s.ratePerKwh === null || s.ratePerKwh === undefined ? null : Number(s.ratePerKwh)
   })).sort((a,b) => a.minKwh - b.minKwh);
+  if (slabs.some(s => !s.name || !Number.isFinite(s.minKwh) || s.minKwh < 0 || !Number.isFinite(s.ratePerKwh) || s.ratePerKwh < 0 || (s.maxKwh !== null && (!Number.isFinite(s.maxKwh) || s.maxKwh < 0)))) {
+    return res.status(400).json({ message: "Each tariff slab needs a name and valid non-negative unit bounds and rate" });
+  }
 
   if (!slabs.length || slabs[0].minKwh !== 0) return res.status(400).json({ message: "First slab must start at 0 kWh" });
+  if (slabs[slabs.length - 1].maxKwh !== null) return res.status(400).json({ message: "Last slab must have no upper limit" });
   for (let i=0;i<slabs.length-1;i++) {
     if (slabs[i].maxKwh === null || slabs[i].maxKwh <= slabs[i].minKwh || slabs[i].maxKwh !== slabs[i+1].minKwh) {
       return res.status(400).json({ message: "Slabs must be continuous: previous max must equal next min" });
