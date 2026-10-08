@@ -2,87 +2,78 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Energy Dashboard | Smart Energy Meter</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f172a">
+  <title>My Energy | Smart Energy Meter</title>
   <link rel="stylesheet" href="/css/style.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">Energy <span>Meter</span> / User</div>
-    <div class="userbox"><span id="userName"></span><button class="btn small secondary" onclick="logout()">Logout</button></div>
+    <div class="brand">⚡ Energy <span>Meter</span></div>
+    <div class="userbox"><span id="userName"></span><button id="themeBtn" class="icon-btn" aria-label="Toggle theme">◐</button><button class="btn small secondary" onclick="logout()">Logout</button></div>
   </header>
-  <main class="main user-main">
-    <div class="toolbar">
-      <div><h1 class="page-title">My Energy Dashboard</h1><p class="muted">Live costs and readings are shown only when meter data is available.</p></div>
-      <select id="meterSelect" aria-label="Select meter"></select>
+  <main class="user-main">
+    <div class="page-head">
+      <div><h1 class="page-title">My energy</h1><p class="muted" id="liveLine">Live readings appear when your meter reports.</p></div>
+      <div class="field" style="min-width:220px"><select id="meterSelect" aria-label="Select meter"></select></div>
     </div>
-    <nav class="user-nav" aria-label="User dashboard sections">
-      <button class="user-navbtn active" data-tab="overview">Overview</button>
-      <button class="user-navbtn" data-tab="analytics">Usage analytics</button>
-      <button class="user-navbtn" data-tab="reports">Email reports</button>
-      <button class="user-navbtn" data-tab="insights">Saving & alerts</button>
-      <button class="user-navbtn" data-tab="account">Account & password</button>
+    <nav class="user-nav" aria-label="Sections">
+      <button class="user-navbtn active" data-tab="overview"><span class="ico">▦</span>Overview</button>
+      <button class="user-navbtn" data-tab="analytics"><span class="ico">📈</span>Usage</button>
+      <button class="user-navbtn" data-tab="meter"><span class="ico">⚙</span>My meter</button>
+      <button class="user-navbtn" data-tab="insights"><span class="ico">🔔</span>Insights</button>
+      <button class="user-navbtn" data-tab="account"><span class="ico">👤</span>Account</button>
     </nav>
-    <div id="noMeter" class="panel" style="display:none">No meter has been assigned to your account yet. Please ask the admin to assign one.</div>
-    <section id="overview" class="user-section active" aria-label="Energy overview">
-      <section aria-labelledby="costHeading">
-        <h2 id="costHeading" class="section-title">Electricity cost</h2>
-        <div class="grid cards">
-          <div class="card cost-primary"><div class="label">Live running cost / hour</div><div class="metric" id="costPerHour">--</div><div id="avgCostPerHour" class="status-text">Today's average: --</div></div>
-          <div class="card"><div class="label">Today's cost</div><div class="metric" id="todayCost">--</div><div id="dayCostCompare" class="status-text">Yesterday: --</div></div>
-          <div class="card"><div class="label">Current billing-period cost</div><div class="metric" id="monthCost">--</div><div id="monthCostCompare" class="status-text">Previous period: --</div><div id="calendarMonthCompare" class="status-text">Calendar month: --</div></div>
-          <div class="card"><div class="label">Expected period-end bill</div><div class="metric" id="expectedBill">--</div><div id="billingPeriod" class="status-text">Billing period: --</div></div>
-        </div>
-        <div class="grid two">
-          <div class="card"><div class="label">Monthly budget vs actual</div><div class="metric" id="budgetUsage">--</div><div id="budgetDetail" class="status-text">Set by your administrator</div></div>
-          <div class="card"><div class="label">Current slab / energy charge</div><div class="metric" id="slab">--</div><div id="rate" class="status-text">--</div><div id="mostExpensiveHour" class="status-text">Peak cost hour: --</div></div>
-        </div>
-        <div class="panel" style="margin-top:16px">
-          <div class="toolbar"><b>Bill estimate breakdown</b><span id="billTotal" class="metric compact">--</span></div>
-          <div class="grid three billing-breakdown">
-            <div>Energy charges <b id="energyCharges">--</b></div><div>FAC <b id="facCharge">--</b></div>
-            <div>Electricity duty <b id="dutyCharge">--</b></div><div>Wheeling charges <b id="wheelingCharge">--</b></div>
-            <div>Fixed charges <b id="fixedCharge">--</b></div><div>Other charges <b id="otherCharge">--</b></div>
-          </div>
-          <p class="status-text">Estimate from administrator-configured tariff and charges; your utility bill may include additional adjustments.</p>
-        </div>
-      </section>
-      <section aria-labelledby="unitsHeading">
-        <h2 id="unitsHeading" class="section-title">Energy & connection</h2>
-        <div class="grid cards">
-          <div class="card"><div class="label">Today</div><div class="metric" id="todayKwh">--</div></div>
-          <div class="card"><div class="label">Yesterday</div><div class="metric" id="yesterdayKwh">--</div></div>
-          <div class="card"><div class="label">This billing period</div><div class="metric" id="monthKwh">--</div></div>
-          <div class="card"><div class="label">Peak power</div><div class="metric" id="peakPower">--</div><div id="peakPowerAt" class="status-text">--</div></div>
-          <div class="card"><div class="label">ESP32 connection</div><div class="metric" id="online">--</div><div id="lastReceived" class="status-text">Last data: --</div></div>
-          <div class="card"><div class="label">Online duration</div><div class="metric" id="onlineDuration">--</div><div id="onlineSince" class="status-text">Since: --</div></div>
-        </div>
-      </section>
-      <section aria-labelledby="technicalHeading">
-        <h2 id="technicalHeading" class="section-title">Technical readings</h2>
-        <div class="grid cards">
-          <div class="card"><div class="label">Voltage</div><div class="metric" id="voltage">--</div></div>
-          <div class="card"><div class="label">Current</div><div class="metric" id="current">--</div></div>
-          <div class="card"><div class="label">Power</div><div class="metric" id="power">--</div></div>
-          <div class="card"><div class="label">Meter energy</div><div class="metric" id="energy">--</div></div>
-          <div class="card"><div class="label">Power factor</div><div class="metric" id="powerFactor">--</div></div>
-          <div class="card"><div class="label">Frequency</div><div class="metric" id="frequency">--</div></div>
-          <div class="card"><div class="label">Sensor availability</div><div class="metric" id="sensorStatus">--</div></div>
-        </div>
-      </section>
+    <div id="noMeter" class="panel empty hidden">No meter has been assigned to your account yet. Please ask your administrator to assign one.</div>
+
+    <section id="overview" class="user-section active">
+      <div class="grid cards">
+        <div class="card cost-primary"><div class="label">Running cost / hour</div><div class="metric" id="costPerHour">--</div><div id="avgCostPerHour" class="status-text">Today's average: --</div></div>
+        <div class="card"><div class="label">Today's cost</div><div class="metric" id="todayCost">--</div><div id="dayCostCompare" class="status-text">Yesterday: --</div></div>
+        <div class="card"><div class="label">This billing period</div><div class="metric" id="monthCost">--</div><div id="monthCostCompare" class="status-text">Previous: --</div><div id="calendarMonthCompare" class="status-text"></div></div>
+        <div class="card"><div class="label">Expected period-end bill</div><div class="metric" id="expectedBill">--</div><div id="billingPeriod" class="status-text">--</div></div>
+      </div>
+      <div class="grid two">
+        <div class="card"><div class="label">Budget used</div><div class="metric" id="budgetUsage">--</div><div class="progress" id="budgetBar"><div style="width:0"></div></div><div id="budgetDetail" class="status-text">Set by your administrator</div></div>
+        <div class="card"><div class="label">Current slab</div><div class="metric" id="slab">--</div><div id="rate" class="status-text">--</div><div id="mostExpensiveHour" class="status-text">Peak cost hour: --</div></div>
+      </div>
+
+      <h2 class="section-title">Live readings</h2>
+      <div class="grid cards">
+        <div class="card"><div class="label">Power</div><div class="metric" id="power">--</div></div>
+        <div class="card"><div class="label">Voltage</div><div class="metric" id="voltage">--</div></div>
+        <div class="card"><div class="label">Current</div><div class="metric" id="current">--</div></div>
+        <div class="card"><div class="label">Meter energy</div><div class="metric" id="energy">--</div></div>
+        <div class="card"><div class="label">Power factor</div><div class="metric" id="powerFactor">--</div></div>
+        <div class="card"><div class="label">Frequency</div><div class="metric" id="frequency">--</div></div>
+        <div class="card"><div class="label">Sensors</div><div class="metric" id="sensorStatus">--</div></div>
+        <div class="card"><div class="label">Connection</div><div class="metric" id="online">--</div><div id="lastReceived" class="status-text">--</div></div>
+      </div>
+
+      <h2 class="section-title">Energy used</h2>
+      <div class="grid cards">
+        <div class="card"><div class="label">Today</div><div class="metric" id="todayKwh">--</div></div>
+        <div class="card"><div class="label">Yesterday</div><div class="metric" id="yesterdayKwh">--</div></div>
+        <div class="card"><div class="label">This billing period</div><div class="metric" id="monthKwh">--</div></div>
+        <div class="card"><div class="label">Peak power</div><div class="metric" id="peakPower">--</div><div id="peakPowerAt" class="status-text">--</div></div>
+      </div>
+
       <div class="panel">
-        <div class="toolbar"><div><b>Relay control</b><div class="status-text">The ESP32 applies commands when it can reach the server.</div></div><div class="actions"><button class="btn success" onclick="setCommand('ON')">TURN ON</button><button class="btn danger" onclick="setCommand('OFF')">TURN OFF</button></div></div>
-        <div id="relayStatus" class="status-text">Relay: --</div>
+        <div class="toolbar" style="margin:0"><b>Bill estimate</b><span id="billTotal" class="metric compact">--</span></div>
+        <div class="grid three billing-breakdown">
+          <div>Energy charges <b id="energyCharges">--</b></div><div>FAC <b id="facCharge">--</b></div>
+          <div>Electricity duty <b id="dutyCharge">--</b></div><div>Wheeling <b id="wheelingCharge">--</b></div>
+          <div>Fixed charges <b id="fixedCharge">--</b></div><div>Other charges <b id="otherCharge">--</b></div>
+        </div>
+        <p class="status-text">Estimated from the tariff your administrator configured; your utility bill may differ.</p>
       </div>
     </section>
 
-    <section id="analytics" class="user-section" aria-label="Usage analytics">
+    <section id="analytics" class="user-section">
       <div class="toolbar">
-        <div><h2 class="section-title">Consumption analytics</h2><p id="graphPeriodLabel" class="muted">Usage history for the selected period.</p></div>
-        <label class="period-control">Graph period
-          <select id="graphPeriod"><option value="24h">Last 24 hours</option><option value="7d">Last 7 days</option><option value="30d" selected>Last 30 days</option><option value="90d">Last 90 days</option></select>
-        </label>
+        <div><h2 class="section-title" style="margin:0">Consumption analytics</h2><p id="graphPeriodLabel" class="status-text"></p></div>
+        <div class="actions"><select id="graphPeriod" aria-label="Graph period"><option value="24h">Last 24 hours</option><option value="7d">Last 7 days</option><option value="30d" selected>Last 30 days</option><option value="90d">Last 90 days</option></select><button id="csvBtn" class="btn secondary small">⬇ CSV</button></div>
       </div>
       <div class="grid two">
         <div class="panel"><b>Hourly usage (kWh)</b><div class="chart-box"><canvas id="hourlyChart"></canvas></div></div>
@@ -92,37 +83,76 @@
       </div>
     </section>
 
-    <section id="reports" class="user-section" aria-label="Email energy reports">
-      <h2 class="section-title">Get an energy report by email</h2>
-      <div class="panel report-request-panel">
-        <p class="muted">Request a polished report for this meter. It includes real measured usage, estimated cost, trend charts, billing details, device status, and any active alerts. Missing readings are clearly marked unavailable.</p>
-        <form id="reportRequestForm" class="report-request-form">
-          <div class="field"><label for="reportRange">Report period</label><select id="reportRange"><option value="1">Today</option><option value="7" selected>Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option></select></div>
-          <button id="requestReportButton" class="btn" type="submit">Email report to my account</button>
+    <section id="meter" class="user-section">
+      <div class="panel">
+        <div class="toolbar" style="margin-bottom:6px"><div><b id="mName">Meter</b><div class="status-text" id="mSub">--</div></div><span id="mOnline" class="pill offline">OFFLINE</span></div>
+        <div class="relay-switch">
+          <div><div class="label">Relay</div><div class="relay-state" id="relayState">--</div><div id="relayStatus" class="status-text">--</div></div>
+          <div class="actions" id="relayButtons"><button class="btn success" onclick="setCommand('ON')">Turn ON</button><button class="btn danger" onclick="setCommand('OFF')">Turn OFF</button></div>
+        </div>
+        <div id="relayLocked" class="notice warn hidden" style="margin-top:12px">🔒 Relay control is disabled for this meter. Ask your administrator if you need to switch it yourself.</div>
+      </div>
+
+      <div id="configLocked" class="notice warn hidden" style="margin-top:14px">🔒 Your administrator has not allowed you to configure this meter. You can still view everything below.</div>
+
+      <div id="configArea">
+        <form id="meterSettingsForm" class="panel">
+          <h2 class="section-title" style="margin-top:0">Meter settings</h2>
+          <div class="form-row" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+            <div class="field"><label for="cfgName">Meter name</label><input id="cfgName" maxlength="80"></div>
+            <div class="field"><label for="cfgInterval">Reading interval (seconds, 2-3600)</label><input id="cfgInterval" type="number" min="2" max="3600"></div>
+          </div>
+          <div class="form-actions"><button class="btn" type="submit">Save meter settings</button></div>
+        </form>
+
+        <div class="panel">
+          <h2 class="section-title" style="margin-top:0">Wi-Fi for this meter</h2>
+          <p id="wifiStatus" class="status-text" style="margin-top:0">--</p>
+          <div class="form-row" style="margin-top:12px">
+            <div class="field"><label>Step 1</label><button id="wifiScan" class="btn secondary" type="button">Scan nearby networks</button></div>
+            <div class="field"><label for="wifiNetworks">Step 2: network</label><select id="wifiNetworks"><option value="">Scan first</option></select></div>
+            <div class="field"><label for="wifiPassword">Step 3: password</label><input id="wifiPassword" type="password" autocomplete="new-password" maxlength="63"></div>
+          </div>
+          <div class="form-actions"><button id="wifiConnect" class="btn" type="button">Save &amp; connect</button></div>
+          <p id="wifiMessage" class="status-text" role="status"></p>
+          <p class="status-text">If the new network fails, the meter returns to its previous Wi-Fi automatically. To set up a brand-new device, hold its BOOT button for 5 seconds and use the <b>ENERGY-METER-SETUP</b> hotspot.</p>
+        </div>
+      </div>
+
+      <h2 class="section-title">Set by your administrator</h2>
+      <div class="grid two">
+        <div class="panel"><b>Tariff slabs</b><div class="table-wrap" style="margin-top:8px"><table class="table"><thead><tr><th>Slab</th><th>From</th><th>To</th><th>₹ / kWh</th></tr></thead><tbody id="slabTable"></tbody></table></div></div>
+        <div class="panel"><b>Charges &amp; limits</b><dl class="kv" id="billingKv" style="margin-top:10px"></dl></div>
+      </div>
+      <div class="panel"><b>Permissions &amp; schedule</b><dl class="kv" id="permKv" style="margin-top:10px"></dl></div>
+    </section>
+
+    <section id="insights" class="user-section">
+      <div class="panel">
+        <h2 class="section-title" style="margin-top:0">Active alerts</h2>
+        <div id="alertsList" class="alert-list"><span class="muted">No alert data available.</span></div>
+      </div>
+      <div class="panel">
+        <h2 class="section-title" style="margin-top:0">Saving suggestions &amp; targets</h2>
+        <p class="status-text" id="targetProgress">--</p>
+        <ul id="suggestionsList" class="insight-list"><li>No suggestions until readings arrive.</li></ul>
+      </div>
+      <div class="panel narrow">
+        <h2 class="section-title" style="margin-top:0">Email me a report</h2>
+        <form id="reportRequestForm" class="form-row" style="grid-template-columns:1fr auto;align-items:end">
+          <div class="field"><label for="reportRange">Period</label><select id="reportRange"><option value="1">Today</option><option value="7" selected>Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option></select></div>
+          <button id="requestReportButton" class="btn" type="submit">Send report</button>
         </form>
         <p id="reportRequestMessage" class="status-text" role="status" aria-live="polite"></p>
       </div>
     </section>
 
-    <section id="insights" class="user-section" aria-label="Saving suggestions and alerts">
-      <h2 class="section-title">Saving suggestions & targets</h2>
-      <div class="panel">
-        <p class="status-text" id="targetProgress">Consumption target: --</p>
-        <ul id="suggestionsList" class="insight-list"><li>No suggestions available until meter readings arrive.</li></ul>
-      </div>
-      <div class="panel" style="margin-top:16px">
-        <h2 class="section-title">Active alerts</h2>
-        <div id="alertsList" class="alert-list"><span class="muted">No alert data available.</span></div>
-      </div>
-    </section>
-
-    <section id="account" class="user-section" aria-label="Account and password">
-      <h2 class="section-title">Change password</h2>
-      <div class="panel account-panel">
-        <p class="muted">Choose a new password with at least 8 characters. You will stay signed in after changing it.</p>
-        <form id="changePasswordForm">
+    <section id="account" class="user-section">
+      <div class="panel narrow">
+        <h2 class="section-title" style="margin-top:0">Change password</h2>
+        <form id="changePasswordForm" style="display:grid;gap:14px">
           <div class="field"><label for="currentPassword">Current password</label><input id="currentPassword" type="password" autocomplete="current-password" required></div>
-          <div class="field"><label for="newPassword">New password</label><input id="newPassword" type="password" minlength="8" autocomplete="new-password" required></div>
+          <div class="field"><label for="newPassword">New password (8+ characters)</label><input id="newPassword" type="password" minlength="8" autocomplete="new-password" required></div>
           <div class="field"><label for="confirmPassword">Confirm new password</label><input id="confirmPassword" type="password" minlength="8" autocomplete="new-password" required></div>
           <button class="btn" type="submit">Change password</button>
         </form>
@@ -131,11 +161,11 @@
       </div>
     </section>
   </main>
-  <dialog id="alertDialog" class="alert-dialog" aria-labelledby="alertDialogTitle">
-    <div class="dialog-head"><h2 id="alertDialogTitle">Energy alert</h2><button id="closeAlert" class="btn small secondary" type="button" aria-label="Close alert">Close</button></div>
+  <dialog id="alertDialog" aria-labelledby="alertDialogTitle">
+    <div class="dialog-head"><h2 id="alertDialogTitle">Energy alert</h2><button id="closeAlert" class="btn small secondary" type="button">Close</button></div>
     <div id="alertDialogContent" class="alert-list"></div>
   </dialog>
-  <div id="toast" class="toast"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/js/common.js"></script>
   <script src="/js/user.js"></script>
 </body>

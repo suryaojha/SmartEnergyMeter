@@ -1,4 +1,4 @@
-require("dotenv").config();
+﻿require("dotenv").config();
 
 const express = require("express");
 const path = require("path");
@@ -16,6 +16,9 @@ const BillingSettings = require("./models/BillingSettings");
 const WifiProvisioning = require("./models/WifiProvisioning");
 const SmtpSettings = require("./models/SmtpSettings");
 const ReportSettings = require("./models/ReportSettings");
+const Otp = require("./models/Otp");
+const AppSettings = require("./models/AppSettings");
+const ActivityLog = require("./models/ActivityLog");
 const { auth, adminOnly } = require("./middleware/auth");
 
 const app = express();
@@ -196,21 +199,100 @@ function liveHourlyCost(power, cumulativeKwh, slabs, settings) {
   return Number((energyCharge + fac + wheeling + duty).toFixed(2));
 }
 
-async function sendResetEmail(user, code) {
+// ---------- One-time passcodes (stored in the Otp collection) ----------
+const OTP_MAX_ATTEMPTS = 5;
+const OTP_RESEND_SECONDS = 60;
+
+async function getAppSettings() {
+  return AppSettings.findOneAndUpdate(
+    { key: "default" },
+    { $setOnInsert: { key: "default" } },
+    { new: true, upsert: true, setDefaultsOnInsert: true }
+  ).lean();
+}
+
+function hashOtp(userId, purpose, code) {
+  return crypto.createHash("sha256").update(`${userId}:${purpose}:${code}`).digest("hex");
+}
+
+async function logActivity(actor, action, target = "", detail = "") {
+  try {
+    await ActivityLog.create({
+      actorId: actor?._id || null, actorName: actor?.name || "System", role: actor?.role || "",
+      action, target: String(target).slice(0, 80), detail: String(detail).slice(0, 240)
+    });
+  } catch (error) {
+    console.error("Activity log failed:", error.message);
+  }
+}
+
+// Creates an OTP row and emails it. Throws an Error with .status when it cannot be delivered or is rate limited.
+async function issueOtp(user, purpose, req) {
+  const last = await Otp.findOne({ userId: user._id, purpose }).sort({ createdAt: -1 }).lean();
+  if (last && Date.now() - new Date(last.createdAt).getTime() < OTP_RESEND_SECONDS * 1000) {
+    const error = new Error(`Please wait ${OTP_RESEND_SECONDS} seconds before requesting another code.`);
+    error.status = 429;
+    throw error;
+  }
+  const settings = await getAppSettings();
+  const code = String(crypto.randomInt(100000, 1000000));
+  await Otp.updateMany({ userId: user._id, purpose, usedAt: null, expiresAt: { $gt: new Date() } }, { $set: { expiresAt: new Date() } });
+  const row = await Otp.create({
+    userId: user._id, email: user.email, purpose, codeHash: hashOtp(user._id, purpose, code),
+    expiresAt: new Date(Date.now() + settings.otpTtlMinutes * 60000), ip: req?.ip || ""
+  });
+  try {
+    await sendOtpEmail(user, code, purpose, settings.otpTtlMinutes);
+  } catch (error) {
+    row.delivery = "failed";
+    row.expiresAt = new Date();
+    await row.save();
+    console.error("OTP email delivery failed:", error.message);
+    const failure = new Error("Could not send the verification code. Ask an administrator to check the mail settings.");
+    failure.status = 503;
+    throw failure;
+  }
+  return row;
+}
+
+// Returns the matching user on success; throws an Error with .status otherwise.
+async function consumeOtp(email, purpose, code) {
+  const invalid = () => Object.assign(new Error("Code is invalid or expired"), { status: 400 });
+  if (!/^\d{6}$/.test(code)) throw invalid();
+  const user = await User.findOne({ email, active: true });
+  if (!user) throw invalid();
+  const row = await Otp.findOne({
+    userId: user._id, purpose, usedAt: null, expiresAt: { $gt: new Date() }, attempts: { $lt: OTP_MAX_ATTEMPTS }
+  }).sort({ createdAt: -1 });
+  if (!row) throw invalid();
+  const expected = Buffer.from(row.codeHash, "hex");
+  const supplied = Buffer.from(hashOtp(user._id, purpose, code), "hex");
+  if (!crypto.timingSafeEqual(expected, supplied)) {
+    row.attempts += 1;
+    if (row.attempts >= OTP_MAX_ATTEMPTS) row.expiresAt = new Date();
+    await row.save();
+    throw invalid();
+  }
+  row.usedAt = new Date();
+  await row.save();
+  return user;
+}
+
+async function sendOtpEmail(user, code, purpose, minutes) {
   const config = await getSmtpConfig();
-  if (!config.host || !config.username || !config.password) throw new Error("SMTP is not configured. Ask an administrator to configure email settings.");
+  if (!config.host || !config.username || !config.password) throw new Error("SMTP is not configured.");
   const transporter = createSmtpTransport(config);
-  const name = String(user.name || "there").replace(/[&<>"']/g, character => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
-  })[character]);
+  const name = escapeHtml(user.name || "there");
+  const reset = purpose === "reset";
+  const heading = reset ? "Reset your password" : "Confirm your sign-in";
+  const intro = reset ? "use this six-digit verification code to set a new password" : "use this six-digit code to finish signing in";
   await transporter.sendMail({
     from: config.from,
     to: user.email,
-    subject: "Your Smart Energy Meter password reset code",
-    text: `Hello ${user.name || "there"},\n\nUse this six-digit code to reset your Smart Energy Meter password:\n\n${code}\n\nThis code expires in 10 minutes and can be used only once. If you did not request a password reset, you can ignore this email.`,
-    html: `<div style="margin:0;padding:32px 16px;background:#f1f5f9;font-family:Arial,sans-serif;color:#172033"><div style="max-width:520px;margin:0 auto;padding:32px;background:#ffffff;border:1px solid #e2e8f0;border-radius:16px"><p style="margin:0 0 8px;color:#2563eb;font-weight:700">SMART ENERGY METER</p><h1 style="margin:0 0 16px;font-size:24px">Reset your password</h1><p style="line-height:1.6">Hello ${name}, use this six-digit verification code to set a new password:</p><div style="margin:24px 0;padding:16px;text-align:center;background:#eff6ff;border-radius:12px;color:#1d4ed8;font-size:32px;font-weight:800;letter-spacing:10px">${code}</div><p style="line-height:1.6">This code expires in <strong>10 minutes</strong> and can be used only once.</p><p style="line-height:1.6;color:#64748b;font-size:13px">If you did not request a password reset, ignore this email. Your password will not change unless this code is submitted on the reset page.</p></div></div>`
+    subject: reset ? "Your Smart Energy Meter password reset code" : "Your Smart Energy Meter sign-in code",
+    text: `Hello ${user.name || "there"},\n\nUse this six-digit code to ${reset ? "reset your Smart Energy Meter password" : "sign in to Smart Energy Meter"}:\n\n${code}\n\nThis code expires in ${minutes} minutes and can be used only once. If you did not request it, ignore this email${reset ? "" : " and consider changing your password"}.`,
+    html: `<div style="margin:0;padding:32px 16px;background:#f1f5f9;font-family:Arial,sans-serif;color:#172033"><div style="max-width:520px;margin:0 auto;padding:32px;background:#ffffff;border:1px solid #e2e8f0;border-radius:16px"><p style="margin:0 0 8px;color:#2563eb;font-weight:700">SMART ENERGY METER</p><h1 style="margin:0 0 16px;font-size:24px">${heading}</h1><p style="line-height:1.6">Hello ${name}, ${intro}:</p><div style="margin:24px 0;padding:16px;text-align:center;background:#eff6ff;border-radius:12px;color:#1d4ed8;font-size:32px;font-weight:800;letter-spacing:10px">${code}</div><p style="line-height:1.6">This code expires in <strong>${minutes} minutes</strong> and can be used only once.</p><p style="line-height:1.6;color:#64748b;font-size:13px">If you did not request this, ignore this email. Nobody can access your account without this code.</p></div></div>`
   });
-  return true;
 }
 
 function smtpEncryptionKey() {
@@ -486,6 +568,8 @@ app.post("/api/meter/data", deviceAuth, async (req, res) => {
         $set: {
           ...readings,
           status,
+          ...(typeof req.body.firmware === "string" ? { firmware: req.body.firmware.slice(0, 20) } : {}),
+          ...(Number.isFinite(req.body.rssi) ? { rssi: req.body.rssi } : {}),
           lastSeen: now,
           onlineSince: online(req.deviceMeter) ? req.deviceMeter.onlineSince : now
         }
@@ -579,12 +663,48 @@ app.post("/api/auth/login", async (req, res) => {
     if (!user || !user.active || !(await bcrypt.compare(password, user.password))) {
       return res.status(401).json({ message: "Invalid email or password" });
     }
+    const settings = await getAppSettings();
+    if (user.role === "Admin" ? settings.otpForAdmins : settings.otpForUsers) {
+      try {
+        await issueOtp(user, "login", req);
+      } catch (error) {
+        return res.status(error.status || 500).json({ message: error.message });
+      }
+      return res.json({ otpRequired: true, email: user.email, ttlMinutes: settings.otpTtlMinutes });
+    }
     res.json({
       token: tokenFor(user),
       user: { id: user._id, name: user.name, email: user.email, role: user.role }
     });
   } catch {
     res.status(500).json({ message: "Login error" });
+  }
+});
+
+app.post("/api/auth/verify-otp", async (req, res) => {
+  try {
+    const email = String(req.body.email || "").toLowerCase().trim();
+    const user = await consumeOtp(email, "login", String(req.body.code || ""));
+    await logActivity(user, "login", user.email, "OTP verified");
+    res.json({
+      token: tokenFor(user),
+      user: { id: user._id, name: user.name, email: user.email, role: user.role }
+    });
+  } catch (error) {
+    res.status(error.status || 500).json({ message: error.status ? error.message : "Verification error" });
+  }
+});
+
+app.post("/api/auth/resend-otp", async (req, res) => {
+  try {
+    const email = String(req.body.email || "").toLowerCase().trim();
+    const user = await User.findOne({ email, active: true });
+    // Only continue a login challenge that was started with a correct password.
+    const pending = user && await Otp.exists({ userId: user._id, purpose: "login", createdAt: { $gt: new Date(Date.now() - 30 * 60000) } });
+    if (user && pending) await issueOtp(user, "login", req);
+    res.json({ message: "If a sign-in is in progress, a new code has been sent." });
+  } catch (error) {
+    res.status(error.status || 500).json({ message: error.message });
   }
 });
 
@@ -613,32 +733,19 @@ app.post("/api/auth/register", auth, adminOnly, async (req, res) => {
 });
 
 app.post("/api/auth/forgot-password", async (req, res) => {
+  const generic = { message: "If the account exists, a password reset code will arrive by email." };
   try {
     const email = String(req.body.email || "").toLowerCase().trim();
-    const user = await User.findOne({ email });
+    const user = await User.findOne({ email, active: true });
     if (user) {
-      if (user.resetCodeSentAt && Date.now() - user.resetCodeSentAt.getTime() < 60000) {
-        return res.json({ message: "If the account exists, a password reset code will arrive by email." });
-      }
-      const code = String(crypto.randomInt(100000, 1000000));
-      user.resetCodeHash = crypto.createHash("sha256").update(`${user._id}:${code}`).digest("hex");
-      user.resetCodeExpiry = new Date(Date.now() + 10 * 60 * 1000);
-      user.resetCodeSentAt = new Date();
-      user.resetCodeAttempts = 0;
-      await user.save();
       try {
-        await sendResetEmail(user, code);
+        await issueOtp(user, "reset", req);
       } catch (error) {
-        user.resetCodeHash = null;
-        user.resetCodeExpiry = null;
-        user.resetCodeSentAt = null;
-        user.resetCodeAttempts = 0;
-        await user.save();
-        console.error("Password reset email delivery failed:", error.message);
-        return res.status(503).json({ message: "Could not send the reset code. Check the SMTP configuration and try again." });
+        if (error.status === 429) return res.json(generic);
+        return res.status(error.status || 500).json({ message: error.message });
       }
     }
-    res.json({ message: "If the account exists, a password reset code will arrive by email." });
+    res.json(generic);
   } catch (error) {
     console.error("Password reset request failed:", error);
     res.status(500).json({ message: "Could not create password reset code" });
@@ -653,37 +760,17 @@ app.post("/api/auth/reset-password", async (req, res) => {
     if (!email || !/^\d{6}$/.test(code) || password.length < 8) {
       return res.status(400).json({ message: "Email, six-digit code, and a password of at least 8 characters are required" });
     }
-    const user = await User.findOne({
-      email,
-      resetCodeExpiry: { $gt: new Date() },
-      resetCodeAttempts: { $lt: 5 }
-    });
-    const hash = user ? crypto.createHash("sha256").update(`${user._id}:${code}`).digest("hex") : "";
-    if (!user || !user.resetCodeHash || !crypto.timingSafeEqual(Buffer.from(user.resetCodeHash, "hex"), Buffer.from(hash, "hex"))) {
-      if (user) {
-        user.resetCodeAttempts += 1;
-        if (user.resetCodeAttempts >= 5) {
-          user.resetCodeHash = null;
-          user.resetCodeExpiry = null;
-        }
-        await user.save();
-      }
-      return res.status(400).json({ message: "Reset code is invalid or expired" });
-    }
-
+    const user = await consumeOtp(email, "reset", code);
     user.password = await bcrypt.hash(password, 10);
-    user.resetCodeHash = null;
-    user.resetCodeExpiry = null;
-    user.resetCodeSentAt = null;
-    user.resetCodeAttempts = 0;
     await user.save();
+    await logActivity(user, "password-reset", user.email, "Reset with email OTP");
     res.json({ message: "Password reset successful. You can login now." });
   } catch (error) {
+    if (error.status) return res.status(error.status).json({ message: error.message === "Code is invalid or expired" ? "Reset code is invalid or expired" : error.message });
     console.error("Password reset failed:", error);
     res.status(500).json({ message: "Password reset error" });
   }
 });
-
 app.put("/api/auth/change-password", auth, async (req, res) => {
   try {
     const currentPassword = String(req.body.currentPassword || "");
@@ -787,15 +874,16 @@ app.post("/api/admin/meters/:meterId/device-token", auth, adminOnly, async (req,
   res.json({ message: "Save this one-time token in the ESP32 setup portal.", meter: publicMeter(meter), deviceToken });
 });
 
-app.get("/api/admin/meters/:meterId/wifi", auth, adminOnly, async (req, res) => {
-  const meter = await Meter.findOne({ meterId: req.params.meterId.toUpperCase() }).select("+deviceTokenHash").lean();
-  if (!meter) return res.status(404).json({ message: "Meter not found" });
+// ---------- Wi-Fi provisioning (shared by admin and the meter's assigned user) ----------
+async function wifiState(meter) {
+  const full = await Meter.findById(meter._id).select("+deviceTokenHash").lean();
   const provision = await WifiProvisioning.findOne({ meterId: meter.meterId }).lean();
-  res.json({
+  return {
     meterId: meter.meterId,
-    paired: Boolean(meter.deviceTokenHash),
+    paired: Boolean(full?.deviceTokenHash),
     online: online(meter),
     lastSeen: meter.lastSeen,
+    rssi: meter.rssi ?? null,
     status: provision?.status || "unconfigured",
     scanRequested: provision?.scanRequested || false,
     networks: provision?.networks || [],
@@ -803,37 +891,33 @@ app.get("/api/admin/meters/:meterId/wifi", auth, adminOnly, async (req, res) => 
     selectedSsid: provision?.selectedSsid || "",
     connectedAt: provision?.connectedAt || null,
     error: provision?.error || ""
-  });
-});
+  };
+}
 
-app.post("/api/admin/meters/:meterId/wifi/scan", auth, adminOnly, async (req, res) => {
-  const meterId = req.params.meterId.toUpperCase();
-  if (!await Meter.exists({ meterId })) return res.status(404).json({ message: "Meter not found" });
+async function queueWifiScan(meter) {
   await WifiProvisioning.findOneAndUpdate(
-    { meterId },
+    { meterId: meter.meterId },
     { $set: { scanRequested: true, status: "scan-requested", error: "" } },
     { new: true, upsert: true, setDefaultsOnInsert: true }
   );
-  res.json({ message: "Wi-Fi scan queued. The paired ESP32 must be online to return nearby networks." });
-});
+  return { message: "Wi-Fi scan queued. The paired ESP32 must be online to return nearby networks." };
+}
 
-app.post("/api/admin/meters/:meterId/wifi/connect", auth, adminOnly, async (req, res) => {
-  const meterId = req.params.meterId.toUpperCase();
-  if (!await Meter.exists({ meterId })) return res.status(404).json({ message: "Meter not found" });
-  const ssid = String(req.body.ssid || "");
-  const password = String(req.body.password || "");
+async function queueWifiConnect(meter, body) {
+  const ssid = String(body.ssid || "");
+  const password = String(body.password || "");
   if (!ssid || ssid.length > 32 || password.length > 63 || (password.length > 0 && password.length < 8)) {
-    return res.status(400).json({ message: "Choose a scanned network and provide a valid Wi-Fi password (8-63 characters, or blank for an open network)" });
+    return { status: 400, message: "Choose a scanned network and provide a valid Wi-Fi password (8-63 characters, or blank for an open network)" };
   }
-  const provision = await WifiProvisioning.findOne({ meterId });
+  const provision = await WifiProvisioning.findOne({ meterId: meter.meterId });
   if (!provision || !provision.networks.some(network => network.ssid === ssid)) {
-    return res.status(400).json({ message: "Select a network returned by the ESP32 scan first" });
+    return { status: 400, message: "Select a network returned by the ESP32 scan first" };
   }
   let encrypted;
   try {
     encrypted = encryptWifiPassword(password);
   } catch (error) {
-    return res.status(503).json({ message: error.message });
+    return { status: 503, message: error.message };
   }
   provision.selectedSsid = ssid;
   provision.passwordCiphertext = encrypted.passwordCiphertext;
@@ -844,9 +928,142 @@ app.post("/api/admin/meters/:meterId/wifi/connect", auth, adminOnly, async (req,
   provision.error = "";
   provision.connectedAt = null;
   await provision.save();
-  res.json({ message: "Wi-Fi settings encrypted and saved to MongoDB. The ESP32 will apply them when it next checks in.", status: provision.status });
+  return { status: 200, message: "Wi-Fi settings encrypted and saved. The ESP32 will apply them when it next checks in.", wifiStatus: provision.status };
+}
+
+async function adminMeter(req, res) {
+  const meter = await Meter.findOne({ meterId: req.params.meterId.toUpperCase() }).lean();
+  if (!meter) res.status(404).json({ message: "Meter not found" });
+  return meter;
+}
+
+// The signed-in user's own meter, only when the admin allowed user configuration.
+async function ownMeter(req, res, needs = null) {
+  const meter = await Meter.findOne({ meterId: req.params.meterId.toUpperCase(), userId: req.user._id }).lean();
+  if (!meter) { res.status(404).json({ message: "Meter is not assigned to your account" }); return null; }
+  if (needs && !meter[needs]) {
+    res.status(403).json({ message: needs === "userRelayAllowed"
+      ? "Your administrator has not allowed relay control for this meter."
+      : "Your administrator has not allowed you to configure this meter." });
+    return null;
+  }
+  return meter;
+}
+
+app.get("/api/admin/meters/:meterId/wifi", auth, adminOnly, async (req, res) => {
+  const meter = await adminMeter(req, res);
+  if (meter) res.json(await wifiState(meter));
 });
 
+app.post("/api/admin/meters/:meterId/wifi/scan", auth, adminOnly, async (req, res) => {
+  const meter = await adminMeter(req, res);
+  if (meter) res.json(await queueWifiScan(meter));
+});
+
+app.post("/api/admin/meters/:meterId/wifi/connect", auth, adminOnly, async (req, res) => {
+  const meter = await adminMeter(req, res);
+  if (!meter) return;
+  const result = await queueWifiConnect(meter, req.body);
+  if (result.status !== 200) return res.status(result.status).json({ message: result.message });
+  await logActivity(req.user, "wifi-connect", meter.meterId, `SSID ${req.body.ssid}`);
+  res.json({ message: result.message, status: result.wifiStatus });
+});
+
+app.put("/api/admin/meters/:meterId/permissions", auth, adminOnly, async (req, res) => {
+  const { userRelayAllowed, userConfigAllowed } = req.body;
+  const updates = {};
+  if (userRelayAllowed !== undefined) {
+    if (typeof userRelayAllowed !== "boolean") return res.status(400).json({ message: "userRelayAllowed must be true or false" });
+    updates.userRelayAllowed = userRelayAllowed;
+  }
+  if (userConfigAllowed !== undefined) {
+    if (typeof userConfigAllowed !== "boolean") return res.status(400).json({ message: "userConfigAllowed must be true or false" });
+    updates.userConfigAllowed = userConfigAllowed;
+  }
+  const meter = await Meter.findOneAndUpdate({ meterId: req.params.meterId.toUpperCase() }, { $set: updates }, { new: true }).populate("userId", "name email");
+  if (!meter) return res.status(404).json({ message: "Meter not found" });
+  await logActivity(req.user, "meter-permissions", meter.meterId, JSON.stringify(updates));
+  res.json({ message: "User permissions updated", meter: publicMeter(meter) });
+});
+
+app.put("/api/admin/meters/:meterId/name", auth, adminOnly, async (req, res) => {
+  const meterName = String(req.body.meterName || "").trim();
+  if (meterName.length > 80) return res.status(400).json({ message: "Meter name must be 80 characters or fewer" });
+  const meter = await Meter.findOneAndUpdate({ meterId: req.params.meterId.toUpperCase() }, { meterName }, { new: true }).populate("userId", "name email");
+  if (!meter) return res.status(404).json({ message: "Meter not found" });
+  res.json({ message: "Meter renamed", meter: publicMeter(meter) });
+});
+
+app.delete("/api/admin/meters/:meterId", auth, adminOnly, async (req, res) => {
+  const meterId = req.params.meterId.toUpperCase();
+  const meter = await Meter.findOneAndDelete({ meterId });
+  if (!meter) return res.status(404).json({ message: "Meter not found" });
+  await Promise.all([Reading.deleteMany({ meterId }), WifiProvisioning.deleteMany({ meterId })]);
+  await logActivity(req.user, "meter-deleted", meterId);
+  res.json({ message: "Meter and its readings were deleted" });
+});
+
+app.put("/api/admin/users/:id", auth, adminOnly, async (req, res) => {
+  const updates = {};
+  if (req.body.active !== undefined) {
+    if (typeof req.body.active !== "boolean") return res.status(400).json({ message: "active must be true or false" });
+    updates.active = req.body.active;
+  }
+  if (req.body.name !== undefined) {
+    const name = String(req.body.name).trim();
+    if (!name || name.length > 80) return res.status(400).json({ message: "Name must be 1 to 80 characters" });
+    updates.name = name;
+  }
+  const user = await User.findOneAndUpdate({ _id: req.params.id, role: "User" }, { $set: updates }, { new: true }).select("-password");
+  if (!user) return res.status(404).json({ message: "User not found" });
+  await logActivity(req.user, "user-updated", user.email, JSON.stringify(updates));
+  res.json({ message: "User updated", user });
+});
+
+app.post("/api/admin/users/:id/reset-password", auth, adminOnly, async (req, res) => {
+  const password = String(req.body.password || "");
+  if (password.length < 8) return res.status(400).json({ message: "Password must be at least 8 characters" });
+  const user = await User.findOne({ _id: req.params.id, role: "User" });
+  if (!user) return res.status(404).json({ message: "User not found" });
+  user.password = await bcrypt.hash(password, 10);
+  await user.save();
+  await logActivity(req.user, "user-password-set", user.email);
+  res.json({ message: "Password updated. Share it with the user securely." });
+});
+
+app.get("/api/admin/security", auth, adminOnly, async (req, res) => {
+  const s = await getAppSettings();
+  res.json({ otpForUsers: s.otpForUsers, otpForAdmins: s.otpForAdmins, otpTtlMinutes: s.otpTtlMinutes });
+});
+
+app.put("/api/admin/security", auth, adminOnly, async (req, res) => {
+  const { otpForUsers, otpForAdmins } = req.body;
+  const otpTtlMinutes = Number(req.body.otpTtlMinutes);
+  if (typeof otpForUsers !== "boolean" || typeof otpForAdmins !== "boolean") return res.status(400).json({ message: "Choose whether OTP login is required for users and admins." });
+  if (!Number.isInteger(otpTtlMinutes) || otpTtlMinutes < 2 || otpTtlMinutes > 30) return res.status(400).json({ message: "OTP validity must be 2 to 30 minutes." });
+  if (otpForUsers || otpForAdmins) {
+    const smtp = await getSmtpConfig().catch(() => null);
+    if (!smtp?.host || !smtp.username || !smtp.password) return res.status(400).json({ message: "Configure Mail delivery first; OTP codes are sent by email and you would be locked out otherwise." });
+    if (otpForAdmins && !smtp.lastTestedAt) return res.status(400).json({ message: "Send a successful SMTP test email before requiring OTP for admins." });
+  }
+  await AppSettings.findOneAndUpdate({ key: "default" }, { $set: { otpForUsers, otpForAdmins, otpTtlMinutes } }, { upsert: true, setDefaultsOnInsert: true });
+  await logActivity(req.user, "security-settings", "otp", `users=${otpForUsers} admins=${otpForAdmins} ttl=${otpTtlMinutes}`);
+  res.json({ message: "Security settings saved" });
+});
+
+app.get("/api/admin/otps", auth, adminOnly, async (req, res) => {
+  const rows = await Otp.find().sort({ createdAt: -1 }).limit(100).select("-codeHash").populate("userId", "name").lean();
+  const now = Date.now();
+  res.json(rows.map(row => ({
+    _id: row._id, name: row.userId?.name || "(deleted)", email: row.email, purpose: row.purpose,
+    createdAt: row.createdAt, expiresAt: row.expiresAt, attempts: row.attempts, usedAt: row.usedAt, ip: row.ip,
+    state: row.usedAt ? "used" : row.delivery === "failed" ? "failed" : new Date(row.expiresAt).getTime() <= now ? "expired" : "active"
+  })));
+});
+
+app.get("/api/admin/activity", auth, adminOnly, async (req, res) => {
+  res.json(await ActivityLog.find().sort({ createdAt: -1 }).limit(150).lean());
+});
 app.put("/api/admin/meters/:meterId/assign", auth, adminOnly, async (req, res) => {
   const meterId = req.params.meterId.toUpperCase();
   const userId = req.body.userId || null;
@@ -856,6 +1073,7 @@ app.put("/api/admin/meters/:meterId/assign", auth, adminOnly, async (req, res) =
   }
   const meter = await Meter.findOneAndUpdate({ meterId }, { userId }, { new: true }).populate("userId", "name email");
   if (!meter) return res.status(404).json({ message: "Meter not found" });
+  await logActivity(req.user, "meter-assign", meterId, userId ? meter.userId?.email : "unassigned");
   res.json({ message: userId ? "Meter assigned successfully" : "Meter unassigned", meter: publicMeter(meter) });
 });
 
@@ -874,6 +1092,7 @@ app.put("/api/admin/meters/:meterId/command", auth, adminOnly, async (req, res) 
   if (!["ON", "OFF"].includes(command)) return res.status(400).json({ message: "Command must be ON or OFF" });
   const meter = await Meter.findOneAndUpdate({ meterId: req.params.meterId.toUpperCase() }, { command }, { new: true }).populate("userId", "name email");
   if (!meter) return res.status(404).json({ message: "Meter not found" });
+  await logActivity(req.user, "relay-command", meter.meterId, `admin ${command}`);
   res.json({ message: `Command ${command} saved. ESP32 will apply it on its next poll.`, meter: publicMeter(meter) });
 });
 
@@ -886,13 +1105,85 @@ app.get("/api/user/meters", auth, async (req, res) => {
 app.put("/api/user/meters/:meterId/command", auth, async (req, res) => {
   const command = String(req.body.command || "").toUpperCase();
   if (!["ON", "OFF"].includes(command)) return res.status(400).json({ message: "Command must be ON or OFF" });
-  const meter = await Meter.findOne({ meterId: req.params.meterId.toUpperCase(), userId: req.user._id });
-  if (!meter) return res.status(404).json({ message: "Meter is not assigned to your account" });
-  meter.command = command;
-  await meter.save();
+  const owned = await ownMeter(req, res, "userRelayAllowed");
+  if (!owned) return;
+  const meter = await Meter.findByIdAndUpdate(owned._id, { command }, { new: true }).populate("userId", "name email");
+  await logActivity(req.user, "relay-command", meter.meterId, command);
   res.json({ message: `Command ${command} saved`, meter: publicMeter(meter) });
 });
 
+// Everything the administrator has set up that applies to this user's meters (read-only for users).
+app.get("/api/user/assigned-config", auth, async (req, res) => {
+  const [slabs, settings, reports] = await Promise.all([
+    TariffSlab.find().sort({ minKwh: 1 }).lean(),
+    BillingSettings.findOne({ key: "default" }).lean(),
+    ReportSettings.findOne({ key: "default" }).lean()
+  ]);
+  const meters = await Meter.find({ userId: req.user._id }).select("meterId meterName userRelayAllowed userConfigAllowed updateFrequency").lean();
+  const { _id, key, createdAt, updatedAt, __v, ...billing } = settings || {};
+  res.json({
+    slabs: slabs.map(({ name, minKwh, maxKwh, ratePerKwh }) => ({ name, minKwh, maxKwh, ratePerKwh })),
+    billing,
+    reports: reports ? { dailyEnabled: reports.dailyEnabled, weeklyEnabled: reports.weeklyEnabled, monthlyEnabled: reports.monthlyEnabled, sendHour: reports.sendHour } : null,
+    meters
+  });
+});
+
+app.put("/api/user/meters/:meterId/settings", auth, async (req, res) => {
+  const meter = await ownMeter(req, res, "userConfigAllowed");
+  if (!meter) return;
+  const updates = {};
+  if (req.body.meterName !== undefined) {
+    const meterName = String(req.body.meterName).trim();
+    if (meterName.length > 80) return res.status(400).json({ message: "Meter name must be 80 characters or fewer" });
+    updates.meterName = meterName;
+  }
+  if (req.body.updateFrequency !== undefined) {
+    const frequency = Number(req.body.updateFrequency);
+    if (!Number.isInteger(frequency) || frequency < 2 || frequency > 3600) return res.status(400).json({ message: "Reading interval must be 2 to 3600 seconds" });
+    updates.updateFrequency = frequency;
+  }
+  const saved = await Meter.findByIdAndUpdate(meter._id, { $set: updates }, { new: true }).populate("userId", "name email");
+  await logActivity(req.user, "meter-config", meter.meterId, JSON.stringify(updates));
+  res.json({ message: "Meter settings saved. The ESP32 picks them up within seconds.", meter: publicMeter(saved) });
+});
+
+app.get("/api/user/meters/:meterId/wifi", auth, async (req, res) => {
+  const meter = await ownMeter(req, res, "userConfigAllowed");
+  if (meter) res.json(await wifiState(meter));
+});
+
+app.post("/api/user/meters/:meterId/wifi/scan", auth, async (req, res) => {
+  const meter = await ownMeter(req, res, "userConfigAllowed");
+  if (meter) res.json(await queueWifiScan(meter));
+});
+
+app.post("/api/user/meters/:meterId/wifi/connect", auth, async (req, res) => {
+  const meter = await ownMeter(req, res, "userConfigAllowed");
+  if (!meter) return;
+  const result = await queueWifiConnect(meter, req.body);
+  if (result.status !== 200) return res.status(result.status).json({ message: result.message });
+  await logActivity(req.user, "wifi-connect", meter.meterId, `SSID ${req.body.ssid}`);
+  res.json({ message: result.message, status: result.wifiStatus });
+});
+
+app.get("/api/meters/:meterId/export.csv", auth, async (req, res) => {
+  const meter = await Meter.findOne({ meterId: req.params.meterId.toUpperCase() }).lean();
+  if (!meter) return res.status(404).json({ message: "Meter not found" });
+  if (req.user.role !== "Admin" && String(meter.userId) !== String(req.user._id)) return res.status(403).json({ message: "Access denied" });
+  const days = Math.max(1, Math.min(90, Number(req.query.days) || 7));
+  const rows = await Reading.find({ meterId: meter.meterId, createdAt: { $gte: new Date(Date.now() - days * 86400000) } })
+    .sort({ createdAt: 1 }).limit(50000).lean();
+  const cell = v => v == null ? "" : v;
+  const csv = ["time_ist,voltage_v,current_a,power_w,energy_kwh,frequency_hz,power_factor,relay"]
+    .concat(rows.map(r => [
+      new Date(r.createdAt).toLocaleString("sv-SE", { timeZone: "Asia/Kolkata" }),
+      cell(r.voltage), cell(r.current), cell(r.power), cell(r.energy), cell(r.frequency), cell(r.powerFactor), cell(r.status)
+    ].join(","))).join("\n");
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${meter.meterId}-${days}d.csv"`);
+  res.send(csv);
+});
 app.post("/api/user/reports/request", auth, async (req, res) => {
   try {
     const days = Number(req.body.days);
@@ -1445,3 +1736,6 @@ connectDB().then(() => {
   console.error("MongoDB connection failed:", err);
   process.exit(1);
 });
+
+
+

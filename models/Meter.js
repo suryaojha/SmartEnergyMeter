@@ -13,6 +13,10 @@ const meterSchema = new mongoose.Schema({
   energy: { type: Number, default: null },
   frequency: { type: Number, default: null },
   powerFactor: { type: Number, default: null },
+  userRelayAllowed: { type: Boolean, default: false },
+  userConfigAllowed: { type: Boolean, default: true },
+  firmware: { type: String, default: "" },
+  rssi: { type: Number, default: null },
   updateFrequency: { type: Number, default: 5, min: 1, max: 3600 },
   lastSeen: { type: Date, default: null },
   onlineSince: { type: Date, default: null }

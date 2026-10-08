@@ -1,1 +1,32 @@
-<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Login | Energy Meter</title><link rel="stylesheet" href="/css/style.css"></head><body class="login-page"><div class="login-box"><h1>Energy Meter</h1><p class="muted">Admin / User login</p><form id="loginForm"><div class="field"><label>Email</label><input id="email" type="email" required placeholder="Email address"></div><div class="field"><label>Password</label><input id="password" type="password" required></div><button class="btn" type="submit">Login</button></form><p style="text-align:center;margin-top:16px"><a class="link" href="/forgot-password.html">Forgot password?</a></p><p id="msg" class="muted"></p></div><script src="/js/common.js"></script><script src="/js/login.js"></script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#0f172a">
+  <title>Sign in | Smart Energy Meter</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body class="login-page">
+  <main class="login-box">
+    <div class="logo">⚡</div>
+    <form id="loginForm">
+      <h1>Welcome back</h1>
+      <p class="muted">Sign in to your energy dashboard.</p>
+      <div class="field"><label for="email">Email</label><input id="email" type="email" required autocomplete="username" placeholder="you@example.com"></div>
+      <div class="field"><label for="password">Password</label><input id="password" type="password" required autocomplete="current-password"></div>
+      <button id="loginBtn" class="btn" type="submit">Sign in</button>
+      <p style="text-align:center;margin:16px 0 0"><a class="link" href="/forgot-password.html">Forgot password?</a></p>
+    </form>
+    <form id="otpForm" class="hidden">
+      <h1>Check your email</h1>
+      <p class="muted" id="otpHint">Enter the 6-digit code we sent you.</p>
+      <div class="field"><label for="otp">Verification code</label><input id="otp" class="otp-input" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required></div>
+      <button id="otpBtn" class="btn" type="submit">Verify and continue</button>
+      <p style="text-align:center;margin:16px 0 0"><button id="resendBtn" class="link" type="button">Resend code</button> · <button id="backBtn" class="link" type="button">Back</button></p>
+    </form>
+    <p id="msg" class="status-text" role="status" aria-live="polite" style="text-align:center"></p>
+  </main>
+  <script src="/js/common.js"></script>
+  <script src="/js/login.js"></script>
+</body>
+</html>

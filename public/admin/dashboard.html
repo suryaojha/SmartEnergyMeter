@@ -2,93 +2,98 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Admin Dashboard | Smart Energy Meter</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f172a">
+  <title>Admin | Smart Energy Meter</title>
   <link rel="stylesheet" href="/css/style.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">Energy <span>Meter</span> / Admin</div>
-    <div class="userbox"><span id="adminName"></span><button class="btn small secondary" onclick="logout()">Logout</button></div>
+    <div style="display:flex;align-items:center;gap:6px">
+      <button id="menuBtn" class="icon-btn menu-btn" aria-label="Open menu">☰</button>
+      <div class="brand">⚡ Energy <span>Meter</span><small>Admin</small></div>
+    </div>
+    <div class="userbox"><span id="adminName"></span><button id="themeBtn" class="icon-btn" aria-label="Toggle theme">◐</button><button class="btn small secondary" onclick="logout()">Logout</button></div>
   </header>
   <div class="layout">
-    <aside class="sidebar">
-      <button class="navbtn active" data-tab="overview">Dashboard</button>
-      <button class="navbtn" data-tab="meters">Meters & Control</button>
-      <button class="navbtn" data-tab="wifi">ESP32 Wi-Fi</button>
-      <button class="navbtn" data-tab="consumption">Consumption</button>
-      <button class="navbtn" data-tab="users">Users</button>
-      <button class="navbtn" data-tab="tariffs">Tariff slabs</button>
-      <button class="navbtn" data-tab="settings">Billing & alerts</button>
-      <button class="navbtn" data-tab="reports">Email reports</button>
-      <button class="navbtn" data-tab="smtp">Mail delivery</button>
+    <aside class="sidebar" id="sidebar">
+      <div class="nav-label">Monitor</div>
+      <button class="navbtn active" data-tab="overview"><span class="ico">▦</span>Dashboard</button>
+      <button class="navbtn" data-tab="consumption"><span class="ico">📈</span>Consumption</button>
+      <div class="nav-label">Manage</div>
+      <button class="navbtn" data-tab="meters"><span class="ico">⏻</span>Meters &amp; control</button>
+      <button class="navbtn" data-tab="wifi"><span class="ico">📶</span>ESP32 Wi-Fi</button>
+      <button class="navbtn" data-tab="users"><span class="ico">👥</span>Users</button>
+      <div class="nav-label">Configure</div>
+      <button class="navbtn" data-tab="tariffs"><span class="ico">₹</span>Tariff slabs</button>
+      <button class="navbtn" data-tab="settings"><span class="ico">⚙</span>Billing &amp; alerts</button>
+      <button class="navbtn" data-tab="reports"><span class="ico">✉</span>Email reports</button>
+      <button class="navbtn" data-tab="smtp"><span class="ico">📮</span>Mail delivery</button>
+      <div class="nav-label">Security</div>
+      <button class="navbtn" data-tab="security"><span class="ico">🛡</span>OTP &amp; security</button>
+      <button class="navbtn" data-tab="activity"><span class="ico">📜</span>Activity log</button>
     </aside>
+    <div class="scrim" id="scrim"></div>
     <main class="main">
+
       <section id="overview" class="section active">
-        <h1 class="page-title">Dashboard</h1>
-        <p class="muted">Only registered device readings are displayed. Missing sensor data is marked unavailable.</p>
+        <div class="page-head"><div><h1 class="page-title">Dashboard</h1><p class="muted">Live status of every registered meter. Updates every 5 seconds.</p></div></div>
         <div class="grid cards">
           <div class="card"><div class="label">Total meters</div><div class="metric" id="totalMeters">0</div></div>
           <div class="card"><div class="label">Online</div><div class="metric" id="onlineMeters">0</div></div>
           <div class="card"><div class="label">Relays ON</div><div class="metric" id="onMeters">0</div></div>
           <div class="card"><div class="label">Users</div><div class="metric" id="totalUsers">0</div></div>
         </div>
-        <div class="panel"><div class="toolbar"><div><b>Live meters</b><div class="muted">Status and data freshness come from ESP32 reports.</div></div></div><div id="overviewMeters" class="grid meter-grid"></div></div>
+        <div id="overviewMeters" class="grid meter-grid"></div>
       </section>
 
       <section id="meters" class="section">
-        <h1 class="page-title">Meters & Control</h1>
-        <p class="muted">Register the meter first, then use the same ID in the ESP32 setup portal.</p>
-        <div class="panel">
-          <form id="meterForm" class="form-row">
-            <div class="field"><label for="newMeterId">Meter ID</label><input id="newMeterId" required maxlength="40"></div>
-            <div class="field"><label for="newMeterName">Meter name</label><input id="newMeterName" maxlength="80"></div>
-            <div class="field"><label for="newMeterFrequency">Reading interval (seconds)</label><input id="newMeterFrequency" type="number" min="1" max="3600" value="5" required></div>
-            <div><button class="btn" type="submit">Register meter</button></div>
-          </form>
-        </div>
-        <div class="panel" style="margin-top:16px">
-          <div class="toolbar"><b>Registered meters</b><button class="btn small" onclick="loadMeters()">Refresh</button></div>
-          <div class="table-wrap"><table class="table"><thead><tr><th>ID / name</th><th>Connection</th><th>Relay</th><th>Assigned user</th><th>Interval</th><th>Control</th><th>Assignment</th><th>Device token</th></tr></thead><tbody id="meterTable"></tbody></table></div>
-        </div>
+        <div class="page-head"><div><h1 class="page-title">Meters &amp; control</h1><p class="muted">Register a meter, assign it, and decide what its user may do.</p></div><button class="btn secondary" onclick="loadMeters()">Refresh</button></div>
+        <form id="meterForm" class="panel">
+          <h2 class="section-title" style="margin-top:0">Register a new meter</h2>
+          <div class="form-row">
+            <div class="field"><label for="newMeterId">Meter ID</label><input id="newMeterId" required maxlength="40" placeholder="e.g. METER01" autocapitalize="characters"></div>
+            <div class="field"><label for="newMeterName">Friendly name</label><input id="newMeterName" maxlength="80" placeholder="e.g. Flat 3B"></div>
+            <div class="field"><label for="newMeterFrequency">Reading interval (s)</label><input id="newMeterFrequency" type="number" min="1" max="3600" value="5" required></div>
+          </div>
+          <div class="form-actions"><button class="btn" type="submit">Register meter</button></div>
+        </form>
+        <div id="meterList" class="grid meter-grid" style="margin-top:14px"></div>
       </section>
 
       <section id="wifi" class="section">
-        <h1 class="page-title">ESP32 Wi-Fi setup</h1>
-        <p class="muted">Ask a paired, online ESP32 to scan nearby networks, choose an SSID, and queue the connection. The Wi-Fi password is encrypted before it is saved in MongoDB.</p>
+        <div class="page-head"><div><h1 class="page-title">ESP32 Wi-Fi</h1><p class="muted">Scan from the meter itself, pick a network, and push it remotely. Passwords are encrypted in the database.</p></div></div>
         <div class="panel">
           <div class="form-row">
             <div class="field"><label for="wifiMeter">Meter</label><select id="wifiMeter"></select></div>
-            <div class="field"><label>Device connection</label><div id="wifiStatus" class="status-text">Select a meter.</div></div>
-            <div class="field"><label for="wifiScan">Network scan</label><button id="wifiScan" class="btn secondary" type="button">Scan nearby networks</button></div>
+            <div class="field"><label>Device connection</label><div id="wifiStatus" class="status-text" style="margin:0">Select a meter.</div></div>
+            <div class="field"><label>&nbsp;</label><button id="wifiScan" class="btn secondary" type="button">Scan nearby networks</button></div>
           </div>
           <p id="wifiMessage" class="status-text" role="status"></p>
         </div>
-        <form id="wifiConnectForm" class="panel" style="margin-top:16px">
-          <h2 class="section-title">Choose a network</h2>
+        <form id="wifiConnectForm" class="panel">
+          <h2 class="section-title" style="margin-top:0">Choose a network</h2>
           <div class="form-row">
-            <div class="field"><label for="wifiNetworks">Nearby Wi-Fi network</label><select id="wifiNetworks" required><option value="">Scan for networks first</option></select></div>
+            <div class="field"><label for="wifiNetworks">Nearby network</label><select id="wifiNetworks" required><option value="">Scan for networks first</option></select></div>
             <div class="field"><label for="wifiPassword">Wi-Fi password</label><input id="wifiPassword" type="password" autocomplete="new-password" maxlength="63"></div>
-            <div class="field"><label>Save and connect</label><button id="wifiConnect" class="btn" type="submit">Save in database & connect</button></div>
+            <div class="field"><label>&nbsp;</label><button id="wifiConnect" class="btn" type="submit">Save &amp; connect</button></div>
           </div>
-          <p class="status-text">Only SSIDs reported by this meter's scan can be selected. New firmware and a paired device token are required.</p>
+          <p class="status-text">If the new network fails, the ESP32 automatically returns to its previous Wi-Fi.</p>
         </form>
       </section>
 
       <section id="consumption" class="section">
-        <h1 class="page-title">Consumption & Billing</h1>
-        <p class="muted">Measured consumption and estimated costs from the configured billing cycle.</p>
+        <div class="page-head"><div><h1 class="page-title">Consumption &amp; billing</h1><p class="muted">Measured usage and estimated cost for any meter.</p></div><button id="consCsv" class="btn secondary">⬇ Download CSV</button></div>
         <div class="panel"><div class="form-row">
           <div class="field"><label for="consMeter">Meter</label><select id="consMeter"></select></div>
           <div class="field"><label for="daysSelect">History period</label><select id="daysSelect"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option></select></div>
-          <div class="field" style="justify-content:end"><button class="btn" onclick="loadConsumption()">Load consumption</button></div>
         </div></div>
         <div class="grid cards">
           <div class="card"><div class="label">Today's cost</div><div class="metric" id="todayCost">--</div></div>
           <div class="card"><div class="label">Current period cost</div><div class="metric" id="monthCost">--</div></div>
           <div class="card"><div class="label">Expected period-end bill</div><div class="metric" id="expectedBill">--</div></div>
-          <div class="card"><div class="label">Monthly budget used</div><div class="metric" id="budgetUsage">--</div></div>
+          <div class="card"><div class="label">Budget used</div><div class="metric" id="budgetUsage">--</div></div>
           <div class="card"><div class="label">Today units</div><div class="metric" id="todayKwh">--</div></div>
           <div class="card"><div class="label">Billing-period units</div><div class="metric" id="monthKwh">--</div></div>
           <div class="card"><div class="label">Current slab</div><div class="metric" id="currentSlab">--</div><div id="slabRate" class="status-text">--</div></div>
@@ -98,8 +103,8 @@
           <div>Energy charges <b id="energyCharges">--</b></div><div>FAC <b id="facCharge">--</b></div><div>Electricity duty <b id="dutyCharge">--</b></div>
           <div>Wheeling <b id="wheelingCharge">--</b></div><div>Fixed charges <b id="fixedCharge">--</b></div><div>Other charges <b id="otherCharge">--</b></div>
         </div></div>
-        <div class="grid two">
-          <div class="panel"><b>Hourly usage today</b><div class="chart-box"><canvas id="hourlyChart"></canvas></div></div>
+        <div class="grid two" style="margin-top:14px">
+          <div class="panel"><b>Hourly usage</b><div class="chart-box"><canvas id="hourlyChart"></canvas></div></div>
           <div class="panel"><b>Daily usage</b><div class="chart-box"><canvas id="dailyChart"></canvas></div></div>
           <div class="panel"><b>Monthly usage</b><div class="chart-box"><canvas id="monthlyChart"></canvas></div></div>
           <div class="panel"><b>Weekly usage</b><div class="chart-box"><canvas id="weeklyChart"></canvas></div></div>
@@ -107,29 +112,29 @@
       </section>
 
       <section id="users" class="section">
-        <h1 class="page-title">Users</h1><p class="muted">Create users here, then assign meters from the Meters tab.</p>
-        <div class="panel"><form id="userForm" class="form-row">
-          <div class="field"><label for="newName">Name</label><input id="newName" required></div>
-          <div class="field"><label for="newEmail">Email</label><input id="newEmail" type="email" required></div>
-          <div class="field"><label for="newPassword">Temporary password</label><input id="newPassword" type="password" minlength="6" required></div>
-          <div><button class="btn" type="submit">Create user</button></div>
-        </form></div>
-        <div class="panel" style="margin-top:16px"><div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Created</th><th>Action</th></tr></thead><tbody id="userTable"></tbody></table></div></div>
+        <div class="page-head"><div><h1 class="page-title">Users</h1><p class="muted">Create users, disable access, or set a new password. Assign meters from Meters &amp; control.</p></div></div>
+        <form id="userForm" class="panel">
+          <div class="form-row">
+            <div class="field"><label for="newName">Name</label><input id="newName" required></div>
+            <div class="field"><label for="newEmail">Email</label><input id="newEmail" type="email" required></div>
+            <div class="field"><label for="newPassword">Temporary password</label><input id="newPassword" type="password" minlength="8" autocomplete="new-password" required></div>
+          </div>
+          <div class="form-actions"><button class="btn" type="submit">Create user</button></div>
+        </form>
+        <div class="panel"><div class="table-wrap"><table class="table stack"><thead><tr><th>Name</th><th>Email</th><th>Meters</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead><tbody id="userTable"></tbody></table></div></div>
       </section>
 
       <section id="tariffs" class="section">
-        <h1 class="page-title">Tariff slabs</h1>
-        <p class="muted">Set your utility's progressive per-kWh rates. No cost estimate is shown until a tariff is configured.</p>
-        <div class="panel"><div id="slabEditor"></div><div class="actions" style="margin-top:14px"><button class="btn secondary" onclick="addSlab()">+ Add slab</button><button class="btn" onclick="saveSlabs()">Save tariff slabs</button></div><p id="slabMsg" class="status-text"></p></div>
+        <div class="page-head"><div><h1 class="page-title">Tariff slabs</h1><p class="muted">Progressive per-kWh rates. No cost is shown until a tariff exists.</p></div></div>
+        <div class="panel"><div id="slabEditor"></div><div class="form-actions"><button class="btn secondary" onclick="addSlab()">+ Add slab</button><button class="btn" onclick="saveSlabs()">Save tariff slabs</button></div><p id="slabMsg" class="status-text"></p></div>
       </section>
 
       <section id="settings" class="section">
-        <h1 class="page-title">Billing & alert settings</h1>
-        <p class="muted">These values are shared by all meters and control user estimates, targets, and threshold alerts.</p>
+        <div class="page-head"><div><h1 class="page-title">Billing &amp; alert settings</h1><p class="muted">Shared by all meters. Users can see these values but not change them.</p></div></div>
         <form id="settingsForm" class="panel">
-          <h2 class="section-title">Billing</h2>
+          <h2 class="section-title" style="margin-top:0">Billing</h2>
           <div class="form-row">
-            <div class="field"><label for="billingCycleStartDay">Billing cycle starts on day (1-28)</label><input id="billingCycleStartDay" type="number" min="1" max="28" required></div>
+            <div class="field"><label for="billingCycleStartDay">Cycle starts on day (1-28)</label><input id="billingCycleStartDay" type="number" min="1" max="28" required></div>
             <div class="field"><label for="fixedCharge">Fixed charge (₹ / cycle)</label><input id="fixedCharge" type="number" min="0" step="0.01" data-setting></div>
             <div class="field"><label for="facPerKwh">FAC (₹ / kWh)</label><input id="facPerKwh" type="number" min="0" step="0.01" data-setting></div>
             <div class="field"><label for="electricityDutyPercent">Electricity duty (%)</label><input id="electricityDutyPercent" type="number" min="0" step="0.01" data-setting></div>
@@ -141,69 +146,80 @@
             <div class="field"><label for="dailyCostLimit">Daily cost limit (₹)</label><input id="dailyCostLimit" type="number" min="0" step="0.01" data-setting></div>
             <div class="field"><label for="monthlyCostLimit">Period budget (₹)</label><input id="monthlyCostLimit" type="number" min="0" step="0.01" data-setting></div>
             <div class="field"><label for="dailyEnergyLimit">Daily energy limit (kWh)</label><input id="dailyEnergyLimit" type="number" min="0" step="0.01" data-setting></div>
-            <div class="field"><label for="consumptionTargetKwh">Daily consumption target (kWh)</label><input id="consumptionTargetKwh" type="number" min="0" step="0.01" data-setting></div>
+            <div class="field"><label for="consumptionTargetKwh">Daily target (kWh)</label><input id="consumptionTargetKwh" type="number" min="0" step="0.01" data-setting></div>
           </div>
           <h2 class="section-title">Electrical thresholds</h2>
           <div class="form-row">
-            <div class="field"><label for="minVoltage">Under-voltage threshold (V)</label><input id="minVoltage" type="number" min="0" step="0.1" data-setting></div>
-            <div class="field"><label for="maxVoltage">Over-voltage threshold (V)</label><input id="maxVoltage" type="number" min="0" step="0.1" data-setting></div>
-            <div class="field"><label for="maxCurrent">Over-current threshold (A)</label><input id="maxCurrent" type="number" min="0" step="0.01" data-setting></div>
-            <div class="field"><label for="maxPower">Over-power threshold (W)</label><input id="maxPower" type="number" min="0" step="0.1" data-setting></div>
-            <div class="field"><label for="standbyPowerThreshold">Standby power threshold (W)</label><input id="standbyPowerThreshold" type="number" min="0" step="0.1" data-setting></div>
-            <div class="field"><label for="minPowerFactor">Low power-factor threshold (0-1)</label><input id="minPowerFactor" type="number" min="0" max="1" step="0.01" data-setting></div>
-            <div class="field checkbox-field"><label><input id="alertsEnabled" type="checkbox"> Enable alerts</label></div>
+            <div class="field"><label for="minVoltage">Under-voltage (V)</label><input id="minVoltage" type="number" min="0" step="0.1" data-setting></div>
+            <div class="field"><label for="maxVoltage">Over-voltage (V)</label><input id="maxVoltage" type="number" min="0" step="0.1" data-setting></div>
+            <div class="field"><label for="maxCurrent">Over-current (A)</label><input id="maxCurrent" type="number" min="0" step="0.01" data-setting></div>
+            <div class="field"><label for="maxPower">Over-power (W)</label><input id="maxPower" type="number" min="0" step="0.1" data-setting></div>
+            <div class="field"><label for="standbyPowerThreshold">Standby power (W)</label><input id="standbyPowerThreshold" type="number" min="0" step="0.1" data-setting></div>
+            <div class="field"><label for="minPowerFactor">Low power factor (0-1)</label><input id="minPowerFactor" type="number" min="0" max="1" step="0.01" data-setting></div>
           </div>
-          <button class="btn" type="submit">Save billing & alert settings</button><p id="settingsMsg" class="status-text"></p>
+          <div class="perm-row" style="margin-top:14px"><div><b>Enable alerts</b><small>Show alert banners to users and in reports</small></div><label class="switch"><input id="alertsEnabled" type="checkbox"><i></i></label></div>
+          <div class="form-actions"><button class="btn" type="submit">Save settings</button></div><p id="settingsMsg" class="status-text"></p>
         </form>
       </section>
 
       <section id="smtp" class="section">
-        <h1 class="page-title">Mail delivery</h1>
-        <p class="muted">Configure the SMTP account used for six-digit password recovery emails. Credentials are encrypted before they are stored in MongoDB.</p>
-        <form id="smtpForm" class="panel smtp-panel">
-          <div class="smtp-status"><div><h2 class="section-title">SMTP account</h2><p id="smtpStatus" class="status-text" role="status">Loading mail settings…</p></div><span id="smtpConfigured" class="pill offline">NOT CONFIGURED</span></div>
-          <div class="form-row smtp-fields">
-            <div class="field"><label for="smtpHost">SMTP host</label><input id="smtpHost" name="host" required maxlength="255" placeholder="smtp.gmail.com" autocomplete="url"></div>
-            <div class="field"><label for="smtpPort">SMTP port</label><input id="smtpPort" name="port" type="number" min="1" max="65535" value="587" required></div>
-            <div class="field"><label for="smtpUsername">SMTP username</label><input id="smtpUsername" name="username" type="email" required maxlength="254" autocomplete="username"></div>
-            <div class="field"><label for="smtpAppPassword">SMTP app password</label><input id="smtpAppPassword" name="appPassword" type="password" maxlength="256" autocomplete="new-password" placeholder="Enter to replace; blank keeps current"></div>
+        <div class="page-head"><div><h1 class="page-title">Mail delivery</h1><p class="muted">SMTP account used for OTP codes, reset codes and reports. The password is encrypted at rest.</p></div></div>
+        <form id="smtpForm" class="panel narrow">
+          <div class="toolbar"><div><h2 class="section-title" style="margin:0">SMTP account</h2><p id="smtpStatus" class="status-text" role="status">Loading…</p></div><span id="smtpConfigured" class="pill offline">NOT CONFIGURED</span></div>
+          <div class="form-row" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+            <div class="field"><label for="smtpHost">SMTP host</label><input id="smtpHost" required maxlength="255" placeholder="smtp.gmail.com"></div>
+            <div class="field"><label for="smtpPort">Port</label><input id="smtpPort" type="number" min="1" max="65535" value="587" required></div>
+            <div class="field"><label for="smtpUsername">Username</label><input id="smtpUsername" type="email" required maxlength="254" autocomplete="username"></div>
+            <div class="field"><label for="smtpAppPassword">App password</label><input id="smtpAppPassword" type="password" maxlength="256" autocomplete="new-password" placeholder="Blank keeps current"></div>
           </div>
-          <p class="smtp-hint">For Gmail, enable 2-Step Verification and create an app password. Paste it here; spaces are removed. The password is never shown again after saving. Mail is sent from the configured SMTP account to each user's registered email. For security, use a dedicated app password and rotate any credential previously shared in chat.</p>
-          <div class="actions smtp-actions">
-            <button class="btn" type="submit">Save mail settings</button>
-            <button id="smtpTestButton" class="btn secondary" type="button" disabled>Send test email to my admin account</button>
-          </div>
+          <p class="status-text">For Gmail enable 2-Step Verification and create an app password. It is never shown again after saving.</p>
+          <div class="form-actions"><button class="btn" type="submit">Save mail settings</button><button id="smtpTestButton" class="btn secondary" type="button" disabled>Send test email to me</button></div>
           <p id="smtpMessage" class="status-text" role="status" aria-live="polite"></p>
         </form>
       </section>
 
       <section id="reports" class="section">
-        <h1 class="page-title">Scheduled email reports</h1>
-        <p class="muted">Automatically email each active user a data-backed report for their assigned meters. Reports include consumption and cost trends, billing estimates, device readings, and active alerts. No sample readings are inserted.</p>
-        <form id="reportSettingsForm" class="panel smtp-panel">
-          <h2 class="section-title">Delivery schedule</h2>
+        <div class="page-head"><div><h1 class="page-title">Scheduled email reports</h1><p class="muted">Email each active user a report for their assigned meters.</p></div></div>
+        <form id="reportSettingsForm" class="panel narrow">
           <div class="report-cadences">
-            <label class="report-cadence"><input id="dailyReportEnabled" type="checkbox"><span><b>Daily</b><small>Yesterday's usage, cost, graph, and alerts</small></span></label>
-            <label class="report-cadence"><input id="weeklyReportEnabled" type="checkbox"><span><b>Weekly</b><small>Last 7 days with daily usage and cost trends</small></span></label>
-            <label class="report-cadence"><input id="monthlyReportEnabled" type="checkbox"><span><b>Monthly</b><small>Previous calendar month with billing breakdown</small></span></label>
+            <label class="report-cadence"><input id="dailyReportEnabled" type="checkbox"><span><b>Daily</b><small>Yesterday's usage and cost</small></span></label>
+            <label class="report-cadence"><input id="weeklyReportEnabled" type="checkbox"><span><b>Weekly</b><small>Last 7 days, sent Mondays</small></span></label>
+            <label class="report-cadence"><input id="monthlyReportEnabled" type="checkbox"><span><b>Monthly</b><small>Previous month, sent on the 1st</small></span></label>
           </div>
-          <div class="report-schedule-row">
-            <div class="field"><label for="reportSendHour">Send time (India Standard Time)</label><select id="reportSendHour"></select></div>
-            <p class="status-text">Reports are sent to the registered email address of active users with assigned meters. Delivery requires valid SMTP settings.</p>
-          </div>
-          <button class="btn" type="submit">Save report schedule</button>
+          <div class="field" style="max-width:260px"><label for="reportSendHour">Send time (India Standard Time)</label><select id="reportSendHour"></select></div>
+          <div class="form-actions"><button class="btn" type="submit">Save schedule</button></div>
           <p id="reportSettingsMessage" class="status-text" role="status" aria-live="polite"></p>
         </form>
       </section>
+
+      <section id="security" class="section">
+        <div class="page-head"><div><h1 class="page-title">OTP &amp; security</h1><p class="muted">Require an emailed one-time code at sign-in. Every issued code is recorded below (the code itself is stored only as a hash).</p></div><button class="btn secondary" onclick="loadOtps()">Refresh</button></div>
+        <form id="securityForm" class="panel narrow">
+          <div class="perm-row" style="border-top:0"><div><b>Require OTP for users</b><small>Users enter a 6-digit emailed code after their password</small></div><label class="switch"><input id="otpForUsers" type="checkbox"><i></i></label></div>
+          <div class="perm-row"><div><b>Require OTP for admins</b><small>Send a successful SMTP test first so you cannot lock yourself out</small></div><label class="switch"><input id="otpForAdmins" type="checkbox"><i></i></label></div>
+          <div class="field" style="max-width:260px;margin-top:12px"><label for="otpTtl">Code validity (minutes)</label><input id="otpTtl" type="number" min="2" max="30" value="10"></div>
+          <div class="form-actions"><button class="btn" type="submit">Save security settings</button></div>
+          <p id="securityMsg" class="status-text" role="status"></p>
+        </form>
+        <div class="panel"><div class="toolbar"><b>OTP table (latest 100)</b></div>
+          <div class="table-wrap"><table class="table stack"><thead><tr><th>Time</th><th>User</th><th>Purpose</th><th>State</th><th>Attempts</th><th>Expires</th><th>IP</th></tr></thead><tbody id="otpTable"></tbody></table></div>
+        </div>
+      </section>
+
+      <section id="activity" class="section">
+        <div class="page-head"><div><h1 class="page-title">Activity log</h1><p class="muted">Who changed what. Entries are kept for 90 days.</p></div><button class="btn secondary" onclick="loadActivity()">Refresh</button></div>
+        <div class="panel"><div class="table-wrap"><table class="table stack"><thead><tr><th>Time</th><th>Who</th><th>Action</th><th>Target</th><th>Detail</th></tr></thead><tbody id="activityTable"></tbody></table></div></div>
+      </section>
     </main>
   </div>
-  <dialog id="deviceTokenDialog" class="token-dialog">
+
+  <dialog id="deviceTokenDialog">
     <div class="dialog-head"><h2>ESP32 device token</h2><button id="closeDeviceToken" class="btn small secondary" type="button">Close</button></div>
-    <p class="muted">Copy this token into the ESP32 setup portal now. It is shown only once; rotating it invalidates the previous token.</p>
+    <p class="muted">Enter this token in the ESP32 setup portal now. It is shown only once; rotating it invalidates the previous token.</p>
     <div class="field"><label for="deviceTokenValue">One-time device token</label><input id="deviceTokenValue" readonly></div>
-    <button id="copyDeviceToken" class="btn" type="button" style="margin-top:12px">Copy token</button>
+    <button id="copyDeviceToken" class="btn block" type="button" style="margin-top:12px">Copy token</button>
   </dialog>
-  <div id="toast" class="toast"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/js/common.js"></script>
   <script src="/js/admin.js"></script>
 </body>

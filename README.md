@@ -46,3 +46,13 @@ Three-phase metering, cloud integrations, mobile applications/push notifications
 For ESP32 pairing, save the one-time token shown when registering a meter (or rotate it from Meters & Control) in the ESP32 setup portal. Wi-Fi scan and connection management require the updated paired firmware and an online meter.
 
 Do not work on mains wiring unless qualified. Use the installed relay/PZEM manufacturer's wiring diagram.
+
+## v3 additions
+
+- **Relay permission per meter** – the admin decides, per meter, whether the assigned user may switch the relay (`userRelayAllowed`, default *locked*). Enforced on the server, not only hidden in the UI.
+- **User meter configuration** – when the admin enables `userConfigAllowed`, the user can rename the meter, change the reading interval and scan/connect the meter's Wi-Fi from their dashboard. Users also see (read-only) every tariff slab, charge, limit and report schedule the admin assigned.
+- **OTP table** – every one-time code (login and password reset) is a row in the `otps` collection (hash only, attempts, expiry, state, IP). Admins see the table under *OTP & security*. Optional OTP-at-login for users and/or admins.
+- **Activity log** (90-day), CSV export of readings, user enable/disable and admin password set, meter rename/delete, dark mode, mobile drawer (admin) and bottom tab bar (user).
+- **Firmware v3** – no hard-coded values: server URL, meter ID, token, relay pin/polarity and PZEM pins are entered in the setup portal. Needs ArduinoJson v7, WiFiManager, PZEM-004T v30, ESP32 Arduino core 3.x. Hold BOOT 5 s to factory-reset.
+
+A full explanation with diagrams is in `SmartEnergyMeter_Guide.pdf`.
