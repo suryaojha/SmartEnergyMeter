@@ -21,9 +21,13 @@
       <div class="nav-label">Monitor</div>
       <button class="navbtn active" data-tab="overview"><span class="ico">▦</span>Dashboard</button>
       <button class="navbtn" data-tab="consumption"><span class="ico">📈</span>Consumption</button>
+      <button class="navbtn" data-tab="presence"><span class="ico">🕒</span>Online history</button>
       <div class="nav-label">Manage</div>
       <button class="navbtn" data-tab="meters"><span class="ico">⏻</span>Meters &amp; control</button>
       <button class="navbtn" data-tab="wifi"><span class="ico">📶</span>ESP32 Wi-Fi</button>
+      <button class="navbtn" data-tab="payments"><span class="ico">💳</span>Payments <span id="pendingBadge" class="pill warn hidden">0</span></button>
+      <button class="navbtn" data-tab="subscriptions"><span class="ico">👛</span>Wallets &amp; plans</button>
+      <button class="navbtn" data-tab="readings"><span class="ico">🧹</span>Readings clean-up</button>
       <button class="navbtn" data-tab="users"><span class="ico">👥</span>Users</button>
       <div class="nav-label">Configure</div>
       <button class="navbtn" data-tab="tariffs"><span class="ico">₹</span>Tariff slabs</button>
@@ -42,7 +46,7 @@
         <div class="grid cards">
           <div class="card"><div class="label">Total meters</div><div class="metric" id="totalMeters">0</div></div>
           <div class="card"><div class="label">Online</div><div class="metric" id="onlineMeters">0</div></div>
-          <div class="card"><div class="label">Relays ON</div><div class="metric" id="onMeters">0</div></div>
+          <div class="card"><div class="label">Data collection ON</div><div class="metric" id="onMeters">0</div></div>
           <div class="card"><div class="label">Users</div><div class="metric" id="totalUsers">0</div></div>
         </div>
         <div id="overviewMeters" class="grid meter-grid"></div>
@@ -111,6 +115,88 @@
         </div>
       </section>
 
+      <section id="presence" class="section">
+        <div class="page-head"><div><h1 class="page-title">Online history</h1><p class="muted">When each ESP32 was online or offline during a day (India time).</p></div><button class="btn secondary" onclick="loadPresence()">Refresh</button></div>
+        <div class="panel"><div class="form-row">
+          <div class="field"><label for="presMeter">Meter</label><select id="presMeter"></select></div>
+          <div class="field"><label for="presDate">Day</label><input id="presDate" type="date"></div>
+        </div></div>
+        <div class="panel">
+          <div class="toolbar"><b>24-hour timeline</b><div id="presSummary"></div></div>
+          <div id="presBar" class="timeline"></div>
+          <div class="timeline-scale"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
+        </div>
+        <div class="panel"><div class="table-wrap"><table class="table stack"><thead><tr><th>State</th><th>From</th><th>To</th><th>Duration</th></tr></thead><tbody id="presList"></tbody></table></div></div>
+      </section>
+
+      <section id="payments" class="section">
+        <div class="page-head"><div><h1 class="page-title">Payments</h1><p class="muted">Users pay by UPI and upload a screenshot. Check it against your bank/UPI app, then approve to credit the wallet and e-mail a receipt.</p></div>
+          <div class="filter-row"><select id="payFilter" aria-label="Filter payments"><option value="pending">Waiting for approval</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="">All</option></select><button class="btn secondary" onclick="loadPayments()">Refresh</button></div></div>
+        <div class="panel"><div class="table-wrap"><table class="table stack"><thead><tr><th>Submitted</th><th>User</th><th>Amount</th><th>UTR</th><th>Status</th><th>Actions</th></tr></thead><tbody id="payTable"></tbody></table></div></div>
+      </section>
+
+      <section id="subscriptions" class="section">
+        <div class="page-head"><div><h1 class="page-title">Wallets &amp; plans</h1><p class="muted">The wallet pays for the monitoring service (a subscription per meter). It is not an electricity bill. When a subscription ends, the meter's data collection switches off automatically.</p></div><button class="btn secondary" onclick="loadSubscriptions()">Refresh</button></div>
+
+        <div class="grid two">
+          <form id="paySettingsForm" class="panel">
+            <h2 class="section-title" style="margin-top:0">Payment details shown to users</h2>
+            <div class="form-row" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+              <div class="field"><label for="payUpiId">UPI ID</label><input id="payUpiId" placeholder="name@bank" maxlength="100"></div>
+              <div class="field"><label for="payPayee">Payee name</label><input id="payPayee" maxlength="80"></div>
+              <div class="field"><label for="payMin">Minimum recharge (₹)</label><input id="payMin" type="number" min="1" step="1" value="10"></div>
+              <div class="field"><label for="payNote">Instructions</label><input id="payNote" maxlength="400" placeholder="Optional message to users"></div>
+            </div>
+            <p class="status-text">With a UPI ID, each user gets a QR with the exact amount filled in, plus PhonePe / Google Pay / Paytm buttons on their phone.</p>
+            <div class="form-actions"><button class="btn" type="submit">Save payment details</button></div>
+            <p id="paySettingsMsg" class="status-text" role="status"></p>
+          </form>
+          <div class="panel">
+            <h2 class="section-title" style="margin-top:0">Your payment QR image</h2>
+            <p class="status-text" style="margin-top:0">Optional: upload your bank/PhonePe/Google Pay QR. Users see it next to the amount-filled QR.</p>
+            <img id="qrPreview" alt="Payment QR" class="hidden" style="max-width:220px;border-radius:12px;border:1px solid var(--border);margin:8px 0">
+            <div class="form-actions"><input id="qrFile" type="file" accept="image/png,image/jpeg,image/webp"><button id="qrUpload" class="btn" type="button">Upload QR</button><button id="qrRemove" class="btn secondary" type="button">Remove</button></div>
+            <p id="qrMsg" class="status-text" role="status"></p>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2 class="section-title" style="margin-top:0">Subscription plans</h2>
+          <form id="planForm" class="form-row" style="grid-template-columns:2fr 1fr 1fr auto;align-items:end">
+            <div class="field"><label for="planName">Plan name</label><input id="planName" required maxlength="60" placeholder="e.g. Monthly"></div>
+            <div class="field"><label for="planPrice">Price (₹)</label><input id="planPrice" type="number" min="1" step="0.01" required></div>
+            <div class="field"><label for="planDays">Days</label><input id="planDays" type="number" min="1" max="3660" step="1" required></div>
+            <button class="btn" type="submit">Add plan</button>
+          </form>
+          <div class="table-wrap" style="margin-top:12px"><table class="table stack"><thead><tr><th>Plan</th><th>Price</th><th>Days</th><th>Status</th><th>Actions</th></tr></thead><tbody id="planTable"></tbody></table></div>
+        </div>
+
+        <div class="panel">
+          <h2 class="section-title" style="margin-top:0">User wallets</h2>
+          <div class="table-wrap"><table class="table stack"><thead><tr><th>User</th><th>Balance</th><th>Adjust wallet</th></tr></thead><tbody id="walletTable"></tbody></table></div>
+        </div>
+
+        <div class="panel">
+          <h2 class="section-title" style="margin-top:0">Meter subscriptions</h2>
+          <div class="table-wrap"><table class="table stack"><thead><tr><th>Meter</th><th>User</th><th>Connection</th><th>Subscription</th><th>Actions</th></tr></thead><tbody id="subTable"></tbody></table></div>
+          <p class="status-text">Meters with no end date never expire. Adding days gives a meter an end date; when it passes, data collection turns off by itself.</p>
+        </div>
+      </section>
+
+      <section id="readings" class="section">
+        <div class="page-head"><div><h1 class="page-title">Readings clean-up</h1><p class="muted">Find and delete garbage values from a meter. Readings outside physical limits (e.g. voltage above 300 V, power factor above 1, frequency outside 40–70 Hz) are highlighted.</p></div><button class="btn secondary" onclick="loadReadings()">Refresh</button></div>
+        <div class="panel"><div class="form-row">
+          <div class="field"><label for="readMeter">Meter</label><select id="readMeter"></select></div>
+          <div class="field"><label for="readHours">Period</label><select id="readHours"><option value="1">Last hour</option><option value="24" selected>Last 24 hours</option><option value="168">Last 7 days</option><option value="720">Last 30 days</option><option value="2160">Last 90 days</option></select></div>
+          <div class="field"><label>Show</label><select id="readSuspect"><option value="0">All readings (latest 200)</option><option value="1">Suspicious only</option></select></div>
+        </div></div>
+        <div class="panel">
+          <div class="toolbar"><b id="readSummary">--</b>
+            <div class="filter-row"><button id="readDeleteSelected" class="btn small danger" type="button">Delete selected</button><button id="readDeleteSuspect" class="btn small danger" type="button">Delete all suspicious in period</button></div></div>
+          <div class="table-wrap"><table class="table stack"><thead><tr><th class="check-col"><input type="checkbox" id="readAll" aria-label="Select all"></th><th>Time</th><th>Voltage</th><th>Current</th><th>Power</th><th>Energy</th><th>Freq</th><th>PF</th></tr></thead><tbody id="readTable"></tbody></table></div>
+        </div>
+      </section>
+
       <section id="users" class="section">
         <div class="page-head"><div><h1 class="page-title">Users</h1><p class="muted">Create users, disable access, or set a new password. Assign meters from Meters &amp; control.</p></div></div>
         <form id="userForm" class="panel">
@@ -173,7 +259,7 @@
             <div class="field"><label for="smtpAppPassword">App password</label><input id="smtpAppPassword" type="password" maxlength="256" autocomplete="new-password" placeholder="Blank keeps current"></div>
           </div>
           <p class="status-text">For Gmail enable 2-Step Verification and create an app password. It is never shown again after saving.</p>
-          <div class="form-actions"><button class="btn" type="submit">Save mail settings</button><button id="smtpTestButton" class="btn secondary" type="button" disabled>Send test email to me</button></div>
+          <div class="form-actions"><button class="btn" type="submit">Save mail settings</button><select id="smtpTestTo" aria-label="Send test email to" style="max-width:260px"></select><button id="smtpTestButton" class="btn secondary" type="button" disabled>Send test email</button></div>
           <p id="smtpMessage" class="status-text" role="status" aria-live="polite"></p>
         </form>
       </section>
@@ -197,6 +283,7 @@
         <form id="securityForm" class="panel narrow">
           <div class="perm-row" style="border-top:0"><div><b>Require OTP for users</b><small>Users enter a 6-digit emailed code after their password</small></div><label class="switch"><input id="otpForUsers" type="checkbox"><i></i></label></div>
           <div class="perm-row"><div><b>Require OTP for admins</b><small>Send a successful SMTP test first so you cannot lock yourself out</small></div><label class="switch"><input id="otpForAdmins" type="checkbox"><i></i></label></div>
+          <div class="perm-row"><div><b>Copy admins on user alerts</b><small>When a user's alert e-mail is sent, also send a copy to every active admin</small></div><label class="switch"><input id="alertAdminCopy" type="checkbox"><i></i></label></div>
           <div class="field" style="max-width:260px;margin-top:12px"><label for="otpTtl">Code validity (minutes)</label><input id="otpTtl" type="number" min="2" max="30" value="10"></div>
           <div class="form-actions"><button class="btn" type="submit">Save security settings</button></div>
           <p id="securityMsg" class="status-text" role="status"></p>
@@ -207,7 +294,7 @@
       </section>
 
       <section id="activity" class="section">
-        <div class="page-head"><div><h1 class="page-title">Activity log</h1><p class="muted">Who changed what. Entries are kept for 90 days.</p></div><button class="btn secondary" onclick="loadActivity()">Refresh</button></div>
+        <div class="page-head"><div><h1 class="page-title">Activity log</h1><p class="muted">Sign-ins, sign-outs, changes and e-mail deliveries. Entries are kept for 90 days.</p></div><div class="filter-row"><select id="activityType" aria-label="Filter activity"><option value="">Everything</option><option value="sessions">Logins &amp; logouts</option><option value="changes">Changes</option><option value="email">E-mail deliveries</option></select><button class="btn secondary" onclick="loadActivity()">Refresh</button></div></div>
         <div class="panel"><div class="table-wrap"><table class="table stack"><thead><tr><th>Time</th><th>Who</th><th>Action</th><th>Target</th><th>Detail</th></tr></thead><tbody id="activityTable"></tbody></table></div></div>
       </section>
     </main>
@@ -218,6 +305,10 @@
     <p class="muted">Enter this token in the ESP32 setup portal now. It is shown only once; rotating it invalidates the previous token.</p>
     <div class="field"><label for="deviceTokenValue">One-time device token</label><input id="deviceTokenValue" readonly></div>
     <button id="copyDeviceToken" class="btn block" type="button" style="margin-top:12px">Copy token</button>
+  </dialog>
+  <dialog id="shotDialog">
+    <div class="dialog-head"><h2>Payment screenshot</h2><button id="closeShot" class="btn small secondary" type="button">Close</button></div>
+    <img id="shotImg" alt="Payment screenshot" style="max-width:100%;max-height:70vh;border-radius:10px">
   </dialog>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/js/common.js"></script>

@@ -8,7 +8,8 @@ const readingSchema = new mongoose.Schema({
   energy: Number,
   frequency: Number,
   powerFactor: Number,
-  status: String,
+  // 1 = visible. 0 = held: received while data collection was disabled; released (set to 1) when it is enabled again.
+  status: { type: Number, default: 1, index: true },
   createdAt: { type: Date, default: Date.now, index: true }
 });
 

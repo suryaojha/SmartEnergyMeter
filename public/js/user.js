@@ -6,6 +6,9 @@ function openTab(tab) {
   window.scrollTo({ top: 0 });
   if (tab === "analytics") loadConsumption();
   if (tab === "meter") { loadAssignedConfig(); loadWifi(); }
+  if (tab === "presence") loadPresence();
+  if (tab === "wallet") loadWallet();
+  if (tab === "insights") loadAlertPrefs();
 }
 document.querySelectorAll(".user-navbtn").forEach(button => button.addEventListener("click", () => openTab(button.dataset.tab)));
 
@@ -48,6 +51,7 @@ $("meterSelect").onchange = async () => {
   renderLive(currentMeter);
   await loadConsumption();
   if ($("meter").classList.contains("active")) { loadAssignedConfig(); loadWifi(); }
+  if ($("presence").classList.contains("active")) loadPresence();
 };
 $("graphPeriod").onchange = loadConsumption;
 
@@ -67,10 +71,11 @@ async function refreshLive() {
 
 function renderLive(meter) {
   if (!meter) return;
-  $("online").textContent = meter.online ? "LIVE" : "OFFLINE";
-  $("online").style.color = meter.online ? "var(--ok)" : "var(--bad)";
-  $("lastReceived").textContent = `Last data ${ago(meter.lastSeen)}${meter.rssi != null ? ` · Wi-Fi ${signalLabel(meter.rssi)}` : ""}`;
-  $("liveLine").textContent = meter.online ? `Live · online for ${duration(meter.uptimeSeconds)}` : `Offline · last data ${ago(meter.lastSeen)}`;
+  const paused = meter.online && !meter.dataEnabled;
+  $("online").textContent = paused ? "PAUSED" : meter.online ? "LIVE" : "OFFLINE";
+  $("online").style.color = paused ? "var(--warn)" : meter.online ? "var(--ok)" : "var(--bad)";
+  $("lastReceived").textContent = paused ? "Connected, but data collection is off" : `Last data ${ago(meter.lastSeen)}${meter.rssi != null ? ` · Wi-Fi ${signalLabel(meter.rssi)}` : ""}`;
+  $("liveLine").textContent = paused ? "Online · data collection is switched off by your administrator" : meter.online ? `Live · online for ${duration(meter.uptimeSeconds)}` : `Offline · last data ${ago(meter.lastSeen)}`;
   $("voltage").textContent = display(meter.voltage, " V", 1);
   $("current").textContent = display(meter.current, " A", 2);
   $("power").textContent = display(meter.power, " W", 1);
@@ -84,11 +89,23 @@ function renderLive(meter) {
   $("mSub").textContent = `${meter.meterId}${meter.firmware ? ` · firmware ${meter.firmware}` : ""}`;
   $("mOnline").textContent = meter.online ? "ONLINE" : "OFFLINE";
   $("mOnline").className = `pill ${meter.online ? "online" : "offline"}`;
-  $("relayState").textContent = meter.status || "--";
-  $("relayState").style.color = meter.status === "ON" ? "var(--ok)" : "";
-  $("relayStatus").textContent = meter.status && meter.command && meter.status !== meter.command ? `Switching to ${meter.command}…` : "The meter applies commands within a few seconds.";
-  $("relayButtons").classList.toggle("hidden", !meter.userRelayAllowed);
-  $("relayLocked").classList.toggle("hidden", meter.userRelayAllowed);
+  $("dataState").textContent = meter.dataEnabled ? "ON" : "OFF";
+  $("dataState").style.color = meter.dataEnabled ? "var(--ok)" : "var(--bad)";
+  const expired = meter.disabledReason === "subscription";
+  $("dataStatus").textContent = meter.dataEnabled ? "Your meter is saving readings." : expired ? "Subscription expired." : "Disabled by your administrator.";
+  $("dataDisabled").classList.toggle("hidden", meter.dataEnabled);
+  $("dataDisabled").textContent = expired
+    ? "⏸ Your meter is online, but its subscription has ended. Readings from this period are kept safely and will appear here once you renew in the Wallet tab."
+    : "⏸ Your meter is online, but your administrator has disabled data collection for it. Readings from this period are kept safely and will appear once it is enabled. Please contact your administrator.";
+  const banner = $("subBanner");
+  if (!meter.dataEnabled) {
+    banner.textContent = expired
+      ? `⏸ ${meter.meterName || meter.meterId} is online, but its subscription has expired — readings are paused. Open the Wallet tab to recharge and renew.`
+      : `⏸ ${meter.meterName || meter.meterId} is online, but your administrator has disabled it. Please contact your administrator to enable it.`;
+  } else if (meter.daysLeft != null && meter.daysLeft <= 3) {
+    banner.textContent = `⏳ Subscription for ${meter.meterName || meter.meterId} ends in ${Math.max(0, meter.daysLeft)} day(s). Keep your wallet topped up in the Wallet tab.`;
+  }
+  banner.classList.toggle("hidden", meter.dataEnabled && !(meter.daysLeft != null && meter.daysLeft <= 3));
 
   $("configLocked").classList.toggle("hidden", meter.userConfigAllowed);
   $("configArea").classList.toggle("hidden", !meter.userConfigAllowed);
@@ -97,14 +114,6 @@ function renderLive(meter) {
     $("cfgName").value = meter.meterName || "";
     $("cfgInterval").value = meter.updateFrequency;
   }
-}
-
-async function setCommand(command) {
-  try {
-    await API.request(`/api/user/meters/${encodeURIComponent($("meterSelect").value)}/command`, { method: "PUT", body: { command } });
-    toast(`Relay ${command} requested`);
-    await refreshLive();
-  } catch (e) { toast(e.message); }
 }
 
 $("meterSettingsForm").addEventListener("submit", async event => {
@@ -178,7 +187,7 @@ async function loadAssignedConfig() {
     const m = c.meters.find(x => x.meterId === currentMeter?.meterId) || {};
     const r = c.reports;
     $("permKv").innerHTML = [
-      row("Relay control", m.userRelayAllowed ? "✅ allowed" : "🔒 locked"), row("Meter configuration", m.userConfigAllowed ? "✅ allowed" : "🔒 locked"),
+      row("Data collection", m.dataEnabled !== false ? "✅ on" : "⏸ off (set by admin)"), row("Meter configuration", m.userConfigAllowed ? "✅ allowed" : "🔒 locked"),
       row("Reading interval", `${m.updateFrequency ?? "--"} s`),
       row("Email reports", r ? ([r.dailyEnabled && "daily", r.weeklyEnabled && "weekly", r.monthlyEnabled && "monthly"].filter(Boolean).join(", ") || "none scheduled") + (r.sendHour != null ? ` at ${String(r.sendHour).padStart(2, "0")}:00 IST` : "") : "none scheduled")
     ].join("");
@@ -269,6 +278,47 @@ function renderAlerts(alerts, meterId) {
 }
 $("closeAlert").addEventListener("click", () => $("alertDialog").close());
 
+/* ---------- online / offline history ---------- */
+function todayIst() { return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }); }
+$("presDate").value = todayIst();
+$("presDate").addEventListener("change", loadPresence);
+
+async function loadPresence() {
+  const meterId = $("meterSelect").value;
+  if (!meterId) return;
+  try {
+    renderPresence(await API.request(`/api/meters/${encodeURIComponent(meterId)}/presence?date=${encodeURIComponent($("presDate").value || todayIst())}`), "presBar", "presSummary", "presList");
+  } catch (e) { toast(e.message); }
+}
+
+/* ---------- my alert settings ---------- */
+async function loadAlertPrefs() {
+  try {
+    const { prefs, adminDefaults, email } = await API.request("/api/user/alert-prefs");
+    $("alertEmail").textContent = email;
+    $("pEmailAlerts").checked = prefs.emailAlerts;
+    $("pAlertOffline").checked = prefs.alertOffline;
+    document.querySelectorAll("#alertPrefsForm [data-limit]").forEach(input => {
+      const key = input.dataset.limit;
+      input.value = prefs[key] ?? "";
+      input.placeholder = adminDefaults[key] == null ? "not set" : `admin: ${adminDefaults[key]}`;
+    });
+  } catch (e) { $("alertPrefsMessage").textContent = e.message; }
+}
+
+$("alertPrefsForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const body = { emailAlerts: $("pEmailAlerts").checked, alertOffline: $("pAlertOffline").checked };
+  document.querySelectorAll("#alertPrefsForm [data-limit]").forEach(input => { body[input.dataset.limit] = input.value === "" ? null : Number(input.value); });
+  try {
+    const r = await API.request("/api/user/alert-prefs", { method: "PUT", body });
+    $("alertPrefsMessage").textContent = r.message;
+    toast(r.message);
+    configFilledFor = null;
+    await loadConsumption();
+  } catch (e) { $("alertPrefsMessage").textContent = e.message; toast(e.message); }
+});
+
 $("reportRequestForm").addEventListener("submit", async event => {
   event.preventDefault();
   const button = $("requestReportButton"), message = $("reportRequestMessage");
@@ -292,6 +342,107 @@ $("changePasswordForm").addEventListener("submit", async event => {
     $("changePasswordForm").reset();
     message.textContent = r.message;
   } catch (e) { message.textContent = e.message; }
+});
+
+/* ---------- wallet & subscription ---------- */
+let walletData = null;
+
+async function loadWallet() {
+  try {
+    const w = walletData = await API.request("/api/user/wallet");
+    $("walletBalance").textContent = inr(w.balance);
+    const planOptions = id => `<option value="">Off</option>${w.plans.map(p => `<option value="${esc(p._id)}" ${String(id) === String(p._id) ? "selected" : ""}>${esc(p.name)} · ${inr(p.price)}</option>`).join("")}`;
+    $("subList").innerHTML = w.meters.map(m => {
+      const state = m.subscriptionEnd == null ? `<span class="pill off">NO EXPIRY</span>`
+        : m.subscriptionExpired ? `<span class="pill offline">EXPIRED</span>`
+        : `<span class="pill ${m.daysLeft <= 3 ? "warn" : "online"}">${m.daysLeft} DAY(S) LEFT</span>`;
+      return `<div class="perm-row" style="display:block"><div class="toolbar" style="margin-bottom:6px"><div><b>${esc(m.meterName || m.meterId)}</b><div class="status-text" style="margin:0">${m.subscriptionEnd ? `Ends ${new Date(m.subscriptionEnd).toLocaleString()}` : "No end date"} · ${m.online ? "online" : "offline"} · data ${m.dataEnabled ? "on" : "off"}</div></div>${state}</div>
+        <div class="actions">${w.plans.map(p => `<button class="btn small" data-subscribe="${esc(m.meterId)}" data-plan="${esc(p._id)}" data-label="${esc(p.name)} for ${inr(p.price)}">${esc(p.name)} · ${inr(p.price)} / ${p.days}d</button>`).join("") || `<span class="status-text">No plans available yet.</span>`}</div>
+        <div class="field" style="margin-top:8px;max-width:320px"><label>Auto-renew from wallet</label><select data-autorenew="${esc(m.meterId)}">${planOptions(m.autoRenewPlanId)}</select></div></div>`;
+    }).join("") || `<span class="status-text">No meter assigned.</span>`;
+
+    $("myPayments").innerHTML = w.payments.map(p => `<tr><td data-label="Date">${new Date(p.createdAt).toLocaleString()}</td><td data-label="Amount"><b>${inr(p.amount)}</b></td><td data-label="UTR">${esc(p.utr)}</td>
+      <td data-label="Status"><span class="pill ${p.status === "approved" ? "online" : p.status === "rejected" ? "offline" : "warn"}">${esc(p.status === "pending" ? "WAITING FOR APPROVAL" : p.status.toUpperCase())}</span>${p.receiptNo ? `<div class="status-text" style="margin:0">${esc(p.receiptNo)}</div>` : ""}${p.adminNote ? `<div class="status-text" style="margin:0">${esc(p.adminNote)}</div>` : ""}</td></tr>`).join("")
+      || `<tr><td colspan="4" class="empty">No payments yet.</td></tr>`;
+    const reasons = { recharge: "Wallet recharge", subscription: "Subscription", "auto-renew": "Auto-renewal", "admin-credit": "Added by admin", "admin-debit": "Deducted by admin" };
+    $("walletTxns").innerHTML = w.txns.map(t => `<tr><td data-label="Date">${new Date(t.createdAt).toLocaleString()}</td><td data-label="Details">${esc(reasons[t.reason] || t.reason)}${t.meterId ? ` · ${esc(t.meterId)}` : ""}<div class="status-text" style="margin:0">${esc(t.note)}</div></td>
+      <td data-label="Amount"><b style="color:var(--${t.type === "credit" ? "ok" : "bad"})">${t.type === "credit" ? "+" : "−"}${inr(t.amount)}</b></td><td data-label="Balance">${inr(t.balanceAfter)}</td></tr>`).join("")
+      || `<tr><td colspan="4" class="empty">No wallet activity yet.</td></tr>`;
+
+    const ready = Boolean(w.pay.upiId || w.pay.hasQr);
+    $("payUnavailable").classList.toggle("hidden", ready);
+    $("payArea").classList.toggle("hidden", !ready);
+    $("rechargeAmount").min = w.pay.minRecharge;
+    $("quickAmounts").innerHTML = [100, 200, 500, 1000].filter(a => a >= w.pay.minRecharge).map(a => `<button type="button" class="btn small secondary" data-quick="${a}">${inr(a).replace(".00", "")}</button>`).join("");
+    $("payInstructions").textContent = w.pay.instructions;
+    $("staticQrBox").classList.toggle("hidden", !w.pay.hasQr);
+    if (w.pay.hasQr && !$("staticQr").src) $("staticQr").src = await API.blobUrl("/api/payment/qr");
+    renderUpiQr();
+  } catch (e) { toast(e.message); }
+}
+
+function renderUpiQr() {
+  if (!walletData) return;
+  const { upiId, payeeName } = walletData.pay;
+  const amount = Number($("rechargeAmount").value);
+  const box = $("upiQr");
+  box.innerHTML = "";
+  $("upiApps").innerHTML = "";
+  if (!upiId || !(amount >= walletData.pay.minRecharge)) {
+    $("payHint").textContent = upiId ? `Enter an amount of at least ${inr(walletData.pay.minRecharge)} to get a QR with the amount filled in.` : "Scan the merchant QR below, then send proof in Step 2.";
+    $("upiLine").textContent = "";
+    box.style.display = "none";
+    return;
+  }
+  box.style.display = "inline-block";
+  const query = `pa=${encodeURIComponent(upiId)}&pn=${encodeURIComponent(payeeName || "Smart Energy Meter")}&am=${amount.toFixed(2)}&cu=INR&tn=${encodeURIComponent("Wallet recharge")}`;
+  if (typeof QRCode !== "undefined") new QRCode(box, { text: `upi://pay?${query}`, width: 200, height: 200, correctLevel: QRCode.CorrectLevel.M });
+  $("payHint").textContent = `Scan with any UPI app to pay ${inr(amount)}.`;
+  $("upiLine").textContent = `${payeeName ? payeeName + " · " : ""}${upiId}`;
+  const apps = [["PhonePe", "phonepe://pay"], ["Google Pay", "tez://upi/pay"], ["Paytm", "paytmmp://pay"], ["Any UPI app", "upi://pay"]];
+  $("upiApps").innerHTML = apps.map(([name, base]) => `<a class="btn small secondary" style="text-decoration:none" href="${base}?${query}">${name}</a>`).join("");
+}
+
+$("rechargeAmount").addEventListener("input", renderUpiQr);
+$("quickAmounts").addEventListener("click", event => {
+  const quick = event.target.closest("[data-quick]");
+  if (quick) { $("rechargeAmount").value = quick.dataset.quick; renderUpiQr(); }
+});
+
+$("paymentForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const button = $("paySubmit"), message = $("payMessage");
+  const file = $("payShot").files[0];
+  if (!file) { message.textContent = "Attach your payment screenshot."; return; }
+  button.disabled = true;
+  message.textContent = "Uploading…";
+  try {
+    const r = await API.request("/api/user/payments", { method: "POST", body: {
+      amount: Number($("rechargeAmount").value), utr: $("payUtr").value, screenshot: await fileToDataUrl(file)
+    } });
+    message.textContent = r.message;
+    toast("Payment submitted for approval");
+    $("paymentForm").reset();
+    await loadWallet();
+  } catch (e) { message.textContent = e.message; toast(e.message); }
+  finally { button.disabled = false; }
+});
+
+$("subList").addEventListener("click", async event => {
+  const b = event.target.closest("[data-subscribe]");
+  if (!b || !confirm(`Pay for ${b.dataset.label} from your wallet?`)) return;
+  try {
+    toast((await API.request(`/api/user/meters/${encodeURIComponent(b.dataset.subscribe)}/subscribe`, { method: "POST", body: { planId: b.dataset.plan } })).message);
+    await Promise.all([loadWallet(), refreshLive()]);
+  } catch (e) { toast(e.message); }
+});
+
+$("subList").addEventListener("change", async event => {
+  const select = event.target.closest("[data-autorenew]");
+  if (!select) return;
+  try {
+    toast((await API.request(`/api/user/meters/${encodeURIComponent(select.dataset.autorenew)}/auto-renew`, { method: "PUT", body: { planId: select.value || null } })).message);
+  } catch (e) { toast(e.message); await loadWallet(); }
 });
 
 function renderChart(id, type, labels, values) {

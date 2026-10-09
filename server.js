@@ -1,4 +1,4 @@
-﻿require("dotenv").config();
+require("dotenv").config();
 
 const express = require("express");
 const path = require("path");
@@ -19,6 +19,11 @@ const ReportSettings = require("./models/ReportSettings");
 const Otp = require("./models/Otp");
 const AppSettings = require("./models/AppSettings");
 const ActivityLog = require("./models/ActivityLog");
+const PresenceEvent = require("./models/PresenceEvent");
+const Plan = require("./models/Plan");
+const WalletTxn = require("./models/WalletTxn");
+const PaymentRequest = require("./models/PaymentRequest");
+const fs = require("fs");
 const { auth, adminOnly } = require("./middleware/auth");
 
 const app = express();
@@ -26,7 +31,11 @@ const PORT = Number(process.env.PORT || 5000);
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) throw new Error("JWT_SECRET must be configured in the environment.");
 
-app.use(express.json());
+// Image uploads (base64 in JSON) get a bigger body limit, but only on these authenticated routes (see uploadJson).
+const UPLOAD_ROUTES = new Set(["/api/user/payments", "/api/admin/payment-qr"]);
+const uploadJson = express.json({ limit: "5mb" });
+const smallJson = express.json();
+app.use((req, res, next) => (UPLOAD_ROUTES.has(req.path) && req.method === "POST" ? next() : smallJson(req, res, next)));
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -34,26 +43,52 @@ function tokenFor(user) {
   return jwt.sign({ id: user._id.toString(), role: user.role }, JWT_SECRET, { expiresIn: "7d" });
 }
 
+const HEARTBEAT_TIMEOUT_MS = 20000; // the ESP32 contacts the server every ~2 s while powered and connected
+
+// A meter is online while its ESP32 keeps contacting the server, whether or not the admin allows it to store data.
 function online(meter) {
+  if (meter.lastHeartbeat) return Date.now() - new Date(meter.lastHeartbeat).getTime() <= HEARTBEAT_TIMEOUT_MS;
   if (!meter.lastSeen) return false;
   const seconds = Math.max(15, Number(meter.updateFrequency || 5) * 3 + 5);
   return (Date.now() - new Date(meter.lastSeen).getTime()) <= seconds * 1000;
+}
+
+function subscriptionExpired(meter) {
+  return Boolean(meter.subscriptionEnd) && new Date(meter.subscriptionEnd).getTime() <= Date.now();
+}
+
+// Data may be stored only while the admin has it ON and any subscription has not run out.
+function dataAllowed(meter) {
+  return meter.dataEnabled !== false && !subscriptionExpired(meter);
 }
 
 function publicMeter(m) {
   const x = m.toObject ? m.toObject() : m;
   const devicePaired = Boolean(x.deviceTokenHash);
   delete x.deviceTokenHash;
+  delete x.activeAlerts;
   const isOnline = online(x);
-  const lastOnlineAt = x.lastSeen ? new Date(x.lastSeen) : null;
+  const lastOnlineAt = x.lastHeartbeat || x.lastSeen ? new Date(x.lastHeartbeat || x.lastSeen) : null;
   const onlineSince = x.onlineSince ? new Date(x.onlineSince) : null;
-  return { ...x, online: isOnline, devicePaired, user: x.userId?.name ? {
+  const expired = subscriptionExpired(x);
+  return { ...x, online: isOnline, dataEnabled: dataAllowed(x), disabledReason: expired ? "subscription" : (x.dataEnabled === false ? (x.disabledReason || "admin") : ""),
+    subscriptionExpired: expired, daysLeft: x.subscriptionEnd ? Math.ceil((new Date(x.subscriptionEnd) - Date.now()) / 86400000) : null, devicePaired, user: x.userId?.name ? {
     _id: x.userId._id, name: x.userId.name, email: x.userId.email
   } : null,
   uptimeSeconds: lastOnlineAt && onlineSince
     ? Math.max(0, Math.floor(((isOnline ? Date.now() : lastOnlineAt.getTime()) - onlineSince.getTime()) / 1000))
     : null
   };
+}
+
+const USER_LIMIT_FIELDS = ["minVoltage", "maxVoltage", "maxCurrent", "maxPower", "minPowerFactor", "dailyEnergyLimit", "dailyCostLimit", "monthlyCostLimit"];
+
+// The limits a user chose for themselves (null/unset ones fall back to the admin's values).
+function userLimitOverrides(user) {
+  const prefs = user?.alertPrefs || {};
+  const out = {};
+  for (const field of USER_LIMIT_FIELDS) if (prefs[field] != null) out[field] = prefs[field];
+  return out;
 }
 
 function indiaStart(date = new Date()) {
@@ -97,7 +132,7 @@ function sumMeasured(rows) {
 
 async function consumptionFor(meterId, start, end) {
   const rows = await Reading.aggregate([
-    { $match: { meterId, energy: { $type: "number" }, createdAt: { $gte: start, $lt: end } } },
+    { $match: { meterId, status: { $ne: 0 }, energy: { $type: "number" }, createdAt: { $gte: start, $lt: end } } },
     { $sort: { createdAt: 1 } },
     { $group: {
       _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt", timezone: "Asia/Kolkata" } },
@@ -116,7 +151,7 @@ async function consumptionFor(meterId, start, end) {
 
 async function periodConsumption(meterId, start, end) {
   const r = await Reading.aggregate([
-    { $match: { meterId, energy: { $type: "number" }, createdAt: { $gte: start, $lt: end } } },
+    { $match: { meterId, status: { $ne: 0 }, energy: { $type: "number" }, createdAt: { $gte: start, $lt: end } } },
     { $sort: { createdAt: 1 } },
     { $group: {
       _id: null,
@@ -279,20 +314,15 @@ async function consumeOtp(email, purpose, code) {
 }
 
 async function sendOtpEmail(user, code, purpose, minutes) {
-  const config = await getSmtpConfig();
-  if (!config.host || !config.username || !config.password) throw new Error("SMTP is not configured.");
-  const transporter = createSmtpTransport(config);
   const name = escapeHtml(user.name || "there");
   const reset = purpose === "reset";
   const heading = reset ? "Reset your password" : "Confirm your sign-in";
   const intro = reset ? "use this six-digit verification code to set a new password" : "use this six-digit code to finish signing in";
-  await transporter.sendMail({
-    from: config.from,
-    to: user.email,
+  await deliverMail(user.email, {
     subject: reset ? "Your Smart Energy Meter password reset code" : "Your Smart Energy Meter sign-in code",
     text: `Hello ${user.name || "there"},\n\nUse this six-digit code to ${reset ? "reset your Smart Energy Meter password" : "sign in to Smart Energy Meter"}:\n\n${code}\n\nThis code expires in ${minutes} minutes and can be used only once. If you did not request it, ignore this email${reset ? "" : " and consider changing your password"}.`,
     html: `<div style="margin:0;padding:32px 16px;background:#f1f5f9;font-family:Arial,sans-serif;color:#172033"><div style="max-width:520px;margin:0 auto;padding:32px;background:#ffffff;border:1px solid #e2e8f0;border-radius:16px"><p style="margin:0 0 8px;color:#2563eb;font-weight:700">SMART ENERGY METER</p><h1 style="margin:0 0 16px;font-size:24px">${heading}</h1><p style="line-height:1.6">Hello ${name}, ${intro}:</p><div style="margin:24px 0;padding:16px;text-align:center;background:#eff6ff;border-radius:12px;color:#1d4ed8;font-size:32px;font-weight:800;letter-spacing:10px">${code}</div><p style="line-height:1.6">This code expires in <strong>${minutes} minutes</strong> and can be used only once.</p><p style="line-height:1.6;color:#64748b;font-size:13px">If you did not request this, ignore this email. Nobody can access your account without this code.</p></div></div>`
-  });
+  }, `${purpose} code`);
 }
 
 function smtpEncryptionKey() {
@@ -341,6 +371,21 @@ function createSmtpTransport(config) {
   });
 }
 
+// Sends one message to one address taken from the database and records the outcome in the activity log,
+// so the admin can see exactly who each mail went to and why a delivery failed.
+async function deliverMail(to, mail, kind) {
+  const config = await getSmtpConfig();
+  if (!config.host || !config.username || !config.password) throw new Error("SMTP is not configured.");
+  try {
+    const info = await createSmtpTransport(config).sendMail({ from: config.from, to, ...mail });
+    if (!info.accepted?.length) throw new Error(`The mail server rejected ${to}`);
+    await logActivity(null, "email-sent", to, kind);
+  } catch (error) {
+    await logActivity(null, "email-failed", to, `${kind}: ${error.message}`);
+    throw error;
+  }
+}
+
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, character => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
@@ -387,6 +432,7 @@ async function buildEnergyReport(meter, days, endExclusive = new Date()) {
   const highestUsageDay = measuredDaily.reduce((highest, row) => !highest || row.kwh > highest.kwh ? row : highest, null);
   const peak = await Reading.findOne({
     meterId: meter.meterId,
+    status: { $ne: 0 },
     power: { $type: "number" },
     createdAt: { $gte: reportStart, $lt: reportEnd }
   }).sort({ power: -1 }).select("power createdAt").lean();
@@ -454,7 +500,7 @@ function renderEnergyReportHtml(user, reports, title) {
       ["Power", report.meter.power == null ? "Unavailable" : `${report.meter.power} W`],
       ["Power factor", report.meter.powerFactor == null ? "Unavailable" : report.meter.powerFactor],
       ["Frequency", report.meter.frequency == null ? "Unavailable" : `${report.meter.frequency} Hz`],
-      ["Relay", report.meter.status || "Unavailable"],
+      ["Data collection", dataAllowed(report.meter) ? "Enabled" : subscriptionExpired(report.meter) ? "Paused: subscription expired" : "Disabled by administrator"],
       ["Last data received", report.meter.lastSeen ? new Date(report.meter.lastSeen).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) : "Never"]
     ].map(([label, value]) => `<tr><td style="padding:7px;border-bottom:1px solid #e2e8f0;color:#64748b">${label}</td><td style="padding:7px;border-bottom:1px solid #e2e8f0;font-weight:600">${escapeHtml(value)}</td></tr>`).join("");
     return `<section style="margin-top:24px;padding-top:20px;border-top:1px solid #e2e8f0"><h2 style="margin:0 0 5px;font-size:20px">${escapeHtml(report.meter.meterName || report.meter.meterId)}</h2><p style="margin:0 0 14px;color:#64748b">Meter ${escapeHtml(report.meter.meterId)} · ${report.start.toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" })} – ${new Date(report.end.getTime() - 1).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" })}</p><table role="presentation" style="width:100%;border-collapse:collapse"><tr><td style="padding:12px;background:#eff6ff;border-radius:8px"><small>ENERGY USED</small><div style="font-size:22px;font-weight:700">${formatUnits(report.totalKwh)}</div></td><td style="padding:12px 6px"></td><td style="padding:12px;background:#ecfdf5;border-radius:8px"><small>ESTIMATED COST</small><div style="font-size:22px;font-weight:700">${formatMoney(report.bill.cost)}</div></td></tr></table><p style="color:#64748b;font-size:13px">${previous}</p><p style="font-size:13px">Daily average: <b>${formatUnits(report.averageDailyKwh)}</b> · Highest-use day: <b>${report.highestUsageDay ? `${escapeHtml(report.highestUsageDay.date)} (${formatUnits(report.highestUsageDay.kwh)})` : "Unavailable"}</b></p>${target}${budget}<p style="font-size:13px">Peak load: <b>${report.peak ? `${Number(report.peak.power).toFixed(1)} W` : "Unavailable"}</b>${report.peak ? ` at ${new Date(report.peak.createdAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}` : ""}</p>${report.bill.cost == null ? `<p style="color:#64748b">Cost is unavailable until tariffs and enough real meter readings are configured.</p>` : `<table role="presentation" style="width:100%;font-size:13px;color:#475569"><tr><td>Energy charges</td><td>${formatMoney(report.bill.energyCharges)}</td><td>FAC</td><td>${formatMoney(report.bill.fac)}</td></tr><tr><td>Electricity duty</td><td>${formatMoney(report.bill.electricityDuty)}</td><td>Wheeling</td><td>${formatMoney(report.bill.wheelingCharges)}</td></tr><tr><td>Fixed / other charges</td><td colspan="3">${formatMoney(report.bill.fixedCharges + report.bill.otherCharges)}</td></tr></table>`}${alertBlock}<h3 style="font-size:16px;margin:18px 0 8px">Daily usage and cost trend</h3><p style="margin:0 0 8px;color:#64748b;font-size:12px">Blue bars show kWh; green bars show estimated daily cost. Unavailable days are not represented as zero.</p><div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="text-align:left;background:#f8fafc"><th style="padding:7px 6px">Date</th><th style="padding:7px 6px">Usage graph</th><th style="padding:7px 6px">Units</th><th style="padding:7px 6px">Cost graph</th><th style="padding:7px 6px">Cost</th></tr></thead><tbody>${chart}</tbody></table></div><h3 style="font-size:16px;margin:18px 0 8px">Live meter parameters</h3><table style="width:100%;border-collapse:collapse;font-size:13px">${technical}</table></section>`;
@@ -471,20 +517,13 @@ function renderEnergyReportText(user, reports, title) {
 
 async function sendEnergyReport(user, meters, days, title, endExclusive = new Date()) {
   if (!meters.length) throw new Error("No assigned meter is available for this report.");
-  const config = await getSmtpConfig();
-  if (!config.host || !config.username || !config.password) {
-    throw new Error("SMTP is not configured. Ask the administrator to configure mail delivery.");
-  }
   const reports = [];
   for (const meter of meters) reports.push(await buildEnergyReport(meter, days, endExclusive));
-  const transporter = createSmtpTransport(config);
-  await transporter.sendMail({
-    from: config.from,
-    to: user.email,
+  await deliverMail(user.email, {
     subject: `Smart Energy Meter — ${title}`,
     text: renderEnergyReportText(user, reports, title),
     html: renderEnergyReportHtml(user, reports, title)
-  });
+  }, title);
   return reports;
 }
 
@@ -535,13 +574,36 @@ async function deviceAuth(req, res, next) {
   }
 }
 
+// Called on every authenticated ESP32 request. Keeps the meter's heartbeat fresh and records an
+// "online" PresenceEvent (plus an "offline" one if the gap was missed by the sweeper) on a transition.
+async function recordHeartbeat(meter, extra = {}) {
+  const now = new Date();
+  const set = { lastHeartbeat: now, ...extra };
+  const stale = meter.presence === "online" && !online(meter);
+  if (meter.presence === "online" && !stale) {
+    const fresh = meter.lastHeartbeat && now - new Date(meter.lastHeartbeat) < 4000;
+    if (fresh && !Object.keys(extra).length) return; // settings polls come every ~2 s; no need to write each one
+    await Meter.updateOne({ _id: meter._id }, { $set: set });
+    return;
+  }
+  const filter = { _id: meter._id, presence: meter.presence };
+  if (stale) filter.lastHeartbeat = meter.lastHeartbeat;
+  const claimed = await Meter.findOneAndUpdate(filter, { $set: { ...set, presence: "online", onlineSince: now } });
+  if (!claimed) {
+    await Meter.updateOne({ _id: meter._id }, { $set: set });
+    return;
+  }
+  if (stale) await PresenceEvent.create({ meterId: meter.meterId, state: "offline", at: meter.lastHeartbeat });
+  await PresenceEvent.create({ meterId: meter.meterId, state: "online", at: now });
+}
+
 // ---------- Health ----------
 app.get("/api/health", (req, res) => res.json({ ok: true, time: new Date() }));
 
 // ---------- Paired ESP32 device APIs ----------
 app.post("/api/meter/data", deviceAuth, async (req, res) => {
   try {
-    const { meterId, status = null } = req.body;
+    const { meterId } = req.body;
     if (typeof meterId !== "string" || !/^[A-Za-z0-9_-]{1,40}$/.test(meterId)) {
       return res.status(400).json({ message: "meterId must contain 1 to 40 letters, numbers, underscores or hyphens" });
     }
@@ -557,38 +619,28 @@ app.post("/api/meter/data", deviceAuth, async (req, res) => {
         return res.status(400).json({ message: `${field} must be a finite number or null` });
       }
     }
-    if (status !== null && !["ON", "OFF"].includes(status)) return res.status(400).json({ message: "status must be ON, OFF, or null" });
 
     const id = String(meterId).toUpperCase();
     if (id !== req.deviceMeter.meterId) return res.status(403).json({ message: "Meter ID does not match paired device" });
+    const dataEnabled = dataAllowed(req.deviceMeter);
+    const { updateFrequency } = req.deviceMeter;
+    const info = {
+      ...(typeof req.body.firmware === "string" ? { firmware: req.body.firmware.slice(0, 20) } : {}),
+      ...(Number.isFinite(req.body.rssi) ? { rssi: req.body.rssi } : {})
+    };
+
+    // Disabled (by the admin or an expired subscription): the ESP32 stays online and its readings are kept
+    // with status 0 ("held"). Users cannot see them until data collection is enabled again.
+    if (!dataEnabled) {
+      await recordHeartbeat(req.deviceMeter, info);
+      await Reading.create({ meterId: id, ...readings, status: 0, createdAt: new Date() });
+      return res.json({ ok: true, stored: true, held: true, dataEnabled: false, updateFrequency });
+    }
+
     const now = new Date();
-    const meter = await Meter.findOneAndUpdate(
-      { meterId: id },
-      {
-        $set: {
-          ...readings,
-          status,
-          ...(typeof req.body.firmware === "string" ? { firmware: req.body.firmware.slice(0, 20) } : {}),
-          ...(Number.isFinite(req.body.rssi) ? { rssi: req.body.rssi } : {}),
-          lastSeen: now,
-          onlineSince: online(req.deviceMeter) ? req.deviceMeter.onlineSince : now
-        }
-      },
-      { new: true }
-    );
-    if (!meter) return res.status(404).json({ message: "Meter is not registered; ask the administrator to add it first" });
-
-    await Reading.create({
-      meterId: id,
-      ...readings,
-      status
-    });
-
-    res.json({
-      ok: true,
-      command: meter.command,
-      updateFrequency: meter.updateFrequency
-    });
+    await recordHeartbeat(req.deviceMeter, { ...info, ...readings, lastSeen: now });
+    await Reading.create({ meterId: id, ...readings, createdAt: now });
+    res.json({ ok: true, stored: true, dataEnabled: true, updateFrequency });
   } catch (e) {
     console.error("meter/data", e);
     res.status(500).json({ message: "Meter data error" });
@@ -596,6 +648,7 @@ app.post("/api/meter/data", deviceAuth, async (req, res) => {
 });
 
 app.get("/api/device/:meterId/settings", deviceAuth, async (req, res) => {
+  await recordHeartbeat(req.deviceMeter);
   const provision = await WifiProvisioning.findOne({ meterId: req.deviceMeter.meterId }).lean();
   let wifiConfig = null;
   if (provision?.status === "pending" && provision.passwordCiphertext) {
@@ -607,7 +660,7 @@ app.get("/api/device/:meterId/settings", deviceAuth, async (req, res) => {
   }
   res.json({
     updateFrequency: req.deviceMeter.updateFrequency,
-    command: req.deviceMeter.command,
+    dataEnabled: dataAllowed(req.deviceMeter),
     wifiScanRequested: provision?.scanRequested || false,
     wifiConfig
   });
@@ -661,6 +714,7 @@ app.post("/api/auth/login", async (req, res) => {
     const password = String(req.body.password || "");
     const user = await User.findOne({ email });
     if (!user || !user.active || !(await bcrypt.compare(password, user.password))) {
+      await logActivity(user && user.active ? user : { name: email || "Unknown" }, "login-failed", email, `from ${req.ip}`);
       return res.status(401).json({ message: "Invalid email or password" });
     }
     const settings = await getAppSettings();
@@ -672,6 +726,7 @@ app.post("/api/auth/login", async (req, res) => {
       }
       return res.json({ otpRequired: true, email: user.email, ttlMinutes: settings.otpTtlMinutes });
     }
+    await logActivity(user, "login", user.email, `from ${req.ip}`);
     res.json({
       token: tokenFor(user),
       user: { id: user._id, name: user.name, email: user.email, role: user.role }
@@ -685,7 +740,7 @@ app.post("/api/auth/verify-otp", async (req, res) => {
   try {
     const email = String(req.body.email || "").toLowerCase().trim();
     const user = await consumeOtp(email, "login", String(req.body.code || ""));
-    await logActivity(user, "login", user.email, "OTP verified");
+    await logActivity(user, "login", user.email, `OTP verified, from ${req.ip}`);
     res.json({
       token: tokenFor(user),
       user: { id: user._id, name: user.name, email: user.email, role: user.role }
@@ -706,6 +761,11 @@ app.post("/api/auth/resend-otp", async (req, res) => {
   } catch (error) {
     res.status(error.status || 500).json({ message: error.message });
   }
+});
+
+app.post("/api/auth/logout", auth, async (req, res) => {
+  await logActivity(req.user, "logout", req.user.email);
+  res.json({ message: "Signed out" });
 });
 
 app.get("/api/auth/me", auth, (req, res) => {
@@ -799,7 +859,7 @@ app.get("/api/admin/overview", auth, adminOnly, async (req, res) => {
   const meters = await Meter.find().populate("userId", "name email").lean();
   const users = await User.countDocuments({ role: "User" });
   const onlineCount = meters.filter(online).length;
-  const onCount = meters.filter(m => m.command === "ON").length;
+  const onCount = meters.filter(dataAllowed).length;
   res.json({
     users, meters: meters.length, online: onlineCount, offline: meters.length - onlineCount, on: onCount, off: meters.length - onCount,
     meterList: meters.map(publicMeter)
@@ -942,9 +1002,7 @@ async function ownMeter(req, res, needs = null) {
   const meter = await Meter.findOne({ meterId: req.params.meterId.toUpperCase(), userId: req.user._id }).lean();
   if (!meter) { res.status(404).json({ message: "Meter is not assigned to your account" }); return null; }
   if (needs && !meter[needs]) {
-    res.status(403).json({ message: needs === "userRelayAllowed"
-      ? "Your administrator has not allowed relay control for this meter."
-      : "Your administrator has not allowed you to configure this meter." });
+    res.status(403).json({ message: "Your administrator has not allowed you to configure this meter." });
     return null;
   }
   return meter;
@@ -970,12 +1028,8 @@ app.post("/api/admin/meters/:meterId/wifi/connect", auth, adminOnly, async (req,
 });
 
 app.put("/api/admin/meters/:meterId/permissions", auth, adminOnly, async (req, res) => {
-  const { userRelayAllowed, userConfigAllowed } = req.body;
+  const { userConfigAllowed } = req.body;
   const updates = {};
-  if (userRelayAllowed !== undefined) {
-    if (typeof userRelayAllowed !== "boolean") return res.status(400).json({ message: "userRelayAllowed must be true or false" });
-    updates.userRelayAllowed = userRelayAllowed;
-  }
   if (userConfigAllowed !== undefined) {
     if (typeof userConfigAllowed !== "boolean") return res.status(400).json({ message: "userConfigAllowed must be true or false" });
     updates.userConfigAllowed = userConfigAllowed;
@@ -998,9 +1052,30 @@ app.delete("/api/admin/meters/:meterId", auth, adminOnly, async (req, res) => {
   const meterId = req.params.meterId.toUpperCase();
   const meter = await Meter.findOneAndDelete({ meterId });
   if (!meter) return res.status(404).json({ message: "Meter not found" });
-  await Promise.all([Reading.deleteMany({ meterId }), WifiProvisioning.deleteMany({ meterId })]);
+  await Promise.all([Reading.deleteMany({ meterId }), WifiProvisioning.deleteMany({ meterId }), PresenceEvent.deleteMany({ meterId })]);
   await logActivity(req.user, "meter-deleted", meterId);
   res.json({ message: "Meter and its readings were deleted" });
+});
+
+// Permanent: wipes every reading (including held ones), the online history and Wi-Fi jobs of a meter, and resets
+// its settings, assignment and subscription to defaults. The meter record and its device token stay, so the
+// ESP32 keeps working. Wallet history is a financial record and is not touched.
+app.post("/api/admin/meters/:meterId/erase", auth, adminOnly, async (req, res) => {
+  const meterId = req.params.meterId.toUpperCase();
+  if (String(req.body.confirm || "").toUpperCase() !== meterId) return res.status(400).json({ message: `Type the meter ID (${meterId}) to confirm.` });
+  const meter = await Meter.findOne({ meterId }).lean();
+  if (!meter) return res.status(404).json({ message: "Meter not found" });
+  const [readings, presence] = await Promise.all([
+    Reading.deleteMany({ meterId }), PresenceEvent.deleteMany({ meterId }), WifiProvisioning.deleteMany({ meterId })
+  ]);
+  await Meter.updateOne({ _id: meter._id }, { $set: {
+    meterName: "", userId: null, dataEnabled: true, disabledReason: "", userConfigAllowed: true, updateFrequency: 5,
+    subscriptionEnd: null, autoRenewPlanId: null, expiryReminderFor: "", activeAlerts: [],
+    voltage: null, current: null, power: null, energy: null, frequency: null, powerFactor: null,
+    lastSeen: null, onlineSince: null, presence: "offline"
+  } });
+  await logActivity(req.user, "meter-erased", meterId, `${readings.deletedCount} readings, ${presence.deletedCount} presence events`);
+  res.json({ message: `All data and settings of ${meterId} were erased (${readings.deletedCount} readings).` });
 });
 
 app.put("/api/admin/users/:id", auth, adminOnly, async (req, res) => {
@@ -1033,11 +1108,12 @@ app.post("/api/admin/users/:id/reset-password", auth, adminOnly, async (req, res
 
 app.get("/api/admin/security", auth, adminOnly, async (req, res) => {
   const s = await getAppSettings();
-  res.json({ otpForUsers: s.otpForUsers, otpForAdmins: s.otpForAdmins, otpTtlMinutes: s.otpTtlMinutes });
+  res.json({ otpForUsers: s.otpForUsers, otpForAdmins: s.otpForAdmins, otpTtlMinutes: s.otpTtlMinutes, alertAdminCopy: Boolean(s.alertAdminCopy) });
 });
 
 app.put("/api/admin/security", auth, adminOnly, async (req, res) => {
   const { otpForUsers, otpForAdmins } = req.body;
+  const alertAdminCopy = req.body.alertAdminCopy === true;
   const otpTtlMinutes = Number(req.body.otpTtlMinutes);
   if (typeof otpForUsers !== "boolean" || typeof otpForAdmins !== "boolean") return res.status(400).json({ message: "Choose whether OTP login is required for users and admins." });
   if (!Number.isInteger(otpTtlMinutes) || otpTtlMinutes < 2 || otpTtlMinutes > 30) return res.status(400).json({ message: "OTP validity must be 2 to 30 minutes." });
@@ -1046,8 +1122,8 @@ app.put("/api/admin/security", auth, adminOnly, async (req, res) => {
     if (!smtp?.host || !smtp.username || !smtp.password) return res.status(400).json({ message: "Configure Mail delivery first; OTP codes are sent by email and you would be locked out otherwise." });
     if (otpForAdmins && !smtp.lastTestedAt) return res.status(400).json({ message: "Send a successful SMTP test email before requiring OTP for admins." });
   }
-  await AppSettings.findOneAndUpdate({ key: "default" }, { $set: { otpForUsers, otpForAdmins, otpTtlMinutes } }, { upsert: true, setDefaultsOnInsert: true });
-  await logActivity(req.user, "security-settings", "otp", `users=${otpForUsers} admins=${otpForAdmins} ttl=${otpTtlMinutes}`);
+  await AppSettings.findOneAndUpdate({ key: "default" }, { $set: { otpForUsers, otpForAdmins, otpTtlMinutes, alertAdminCopy } }, { upsert: true, setDefaultsOnInsert: true });
+  await logActivity(req.user, "security-settings", "otp", `users=${otpForUsers} admins=${otpForAdmins} ttl=${otpTtlMinutes} adminAlertCopy=${alertAdminCopy}`);
   res.json({ message: "Security settings saved" });
 });
 
@@ -1061,8 +1137,75 @@ app.get("/api/admin/otps", auth, adminOnly, async (req, res) => {
   })));
 });
 
+const SESSION_ACTIONS = ["login", "logout", "login-failed"];
+const EMAIL_ACTIONS = ["email-sent", "email-failed"];
 app.get("/api/admin/activity", auth, adminOnly, async (req, res) => {
-  res.json(await ActivityLog.find().sort({ createdAt: -1 }).limit(150).lean());
+  const filter = {};
+  if (req.query.type === "sessions") filter.action = { $in: SESSION_ACTIONS };
+  else if (req.query.type === "email") filter.action = { $in: EMAIL_ACTIONS };
+  else if (req.query.type === "changes") filter.action = { $nin: [...SESSION_ACTIONS, ...EMAIL_ACTIONS] };
+  res.json(await ActivityLog.find(filter).sort({ createdAt: -1 }).limit(300).lean());
+});
+
+// ---------- Garbage-value clean-up (admin) ----------
+// A reading is "suspect" when a value is physically impossible for a single-phase PZEM-004T.
+// Missing (null) values are not suspect; they are shown as unavailable everywhere else too.
+const outOfRange = (field, min, max) => ({ [field]: { $type: "number", $not: { $gte: min, $lte: max } } });
+const SUSPECT_FILTER = {
+  $or: [
+    outOfRange("voltage", 0, 300), outOfRange("current", 0, 100), outOfRange("power", 0, 25000),
+    outOfRange("energy", 0, 100000), outOfRange("frequency", 40, 70), outOfRange("powerFactor", 0, 1)
+  ]
+};
+
+// Makes every reading held (status 0) while data was disabled visible to the user, then refreshes the live values.
+async function releaseHeldReadings(meterId) {
+  const result = await Reading.updateMany({ meterId, status: 0 }, { $set: { status: 1 } });
+  if (result.modifiedCount) await resyncMeterFromReadings(meterId);
+  return result.modifiedCount;
+}
+
+// Puts the meter's "live" values back in line with the newest reading that remains after a delete.
+async function resyncMeterFromReadings(meterId) {
+  const latest = await Reading.findOne({ meterId, status: { $ne: 0 } }).sort({ createdAt: -1 }).lean();
+  const set = latest
+    ? { voltage: latest.voltage ?? null, current: latest.current ?? null, power: latest.power ?? null,
+        energy: latest.energy ?? null, frequency: latest.frequency ?? null, powerFactor: latest.powerFactor ?? null, lastSeen: latest.createdAt }
+    : { voltage: null, current: null, power: null, energy: null, frequency: null, powerFactor: null };
+  await Meter.updateOne({ meterId }, { $set: set });
+}
+
+app.get("/api/admin/meters/:meterId/readings", auth, adminOnly, async (req, res) => {
+  const meter = await adminMeter(req, res);
+  if (!meter) return;
+  const hours = Math.max(1, Math.min(24 * 90, Number(req.query.hours) || 24));
+  const limit = Math.max(10, Math.min(500, Number(req.query.limit) || 200));
+  const base = { meterId: meter.meterId, createdAt: { $gte: new Date(Date.now() - hours * 3600000) } };
+  const filter = req.query.suspect === "1" ? { $and: [base, SUSPECT_FILTER] } : base;
+  const [rows, suspectCount, heldCount] = await Promise.all([
+    Reading.find(filter).sort({ createdAt: -1 }).limit(limit).lean(),
+    Reading.countDocuments({ $and: [base, SUSPECT_FILTER] }),
+    Reading.countDocuments({ meterId: meter.meterId, status: 0 })
+  ]);
+  res.json({ rows, suspectCount, heldCount });
+});
+
+app.post("/api/admin/meters/:meterId/readings/delete", auth, adminOnly, async (req, res) => {
+  const meter = await adminMeter(req, res);
+  if (!meter) return;
+  let filter;
+  if (req.body.suspectHours !== undefined) {
+    const hours = Math.max(1, Math.min(24 * 90, Number(req.body.suspectHours) || 24));
+    filter = { $and: [{ meterId: meter.meterId, createdAt: { $gte: new Date(Date.now() - hours * 3600000) } }, SUSPECT_FILTER] };
+  } else {
+    const ids = Array.isArray(req.body.ids) ? req.body.ids.filter(id => /^[a-f\d]{24}$/i.test(String(id))) : [];
+    if (!ids.length || ids.length > 500) return res.status(400).json({ message: "Select between 1 and 500 readings to delete." });
+    filter = { meterId: meter.meterId, _id: { $in: ids } };
+  }
+  const result = await Reading.deleteMany(filter);
+  await resyncMeterFromReadings(meter.meterId);
+  await logActivity(req.user, "readings-deleted", meter.meterId, `${result.deletedCount} reading(s)`);
+  res.json({ message: `${result.deletedCount} reading(s) deleted.`, deleted: result.deletedCount });
 });
 app.put("/api/admin/meters/:meterId/assign", auth, adminOnly, async (req, res) => {
   const meterId = req.params.meterId.toUpperCase();
@@ -1087,29 +1230,29 @@ app.put("/api/admin/meters/:meterId/frequency", auth, adminOnly, async (req, res
   res.json({ message: `Update frequency set to ${meter.updateFrequency} seconds`, meter: publicMeter(meter) });
 });
 
-app.put("/api/admin/meters/:meterId/command", auth, adminOnly, async (req, res) => {
-  const command = String(req.body.command || "").toUpperCase();
-  if (!["ON", "OFF"].includes(command)) return res.status(400).json({ message: "Command must be ON or OFF" });
-  const meter = await Meter.findOneAndUpdate({ meterId: req.params.meterId.toUpperCase() }, { command }, { new: true }).populate("userId", "name email");
-  if (!meter) return res.status(404).json({ message: "Meter not found" });
-  await logActivity(req.user, "relay-command", meter.meterId, `admin ${command}`);
-  res.json({ message: `Command ${command} saved. ESP32 will apply it on its next poll.`, meter: publicMeter(meter) });
+// ON: the ESP32 may store readings. OFF: it stays connected (shown online) but everything it sends is discarded.
+app.put("/api/admin/meters/:meterId/data-enabled", auth, adminOnly, async (req, res) => {
+  if (typeof req.body.dataEnabled !== "boolean") return res.status(400).json({ message: "dataEnabled must be true or false" });
+  const target = await Meter.findOne({ meterId: req.params.meterId.toUpperCase() }).lean();
+  if (!target) return res.status(404).json({ message: "Meter not found" });
+  if (req.body.dataEnabled && subscriptionExpired(target)) {
+    return res.status(400).json({ message: "This meter's subscription has expired. Extend the subscription (Subscriptions tab) to turn data collection back on." });
+  }
+  const meter = await Meter.findByIdAndUpdate(target._id, { dataEnabled: req.body.dataEnabled, disabledReason: req.body.dataEnabled ? "" : "admin" }, { new: true }).populate("userId", "name email");
+  const released = req.body.dataEnabled ? await releaseHeldReadings(meter.meterId) : 0;
+  await logActivity(req.user, "data-collection", meter.meterId, req.body.dataEnabled ? `enabled, ${released} held reading(s) released` : "disabled");
+  res.json({
+    message: req.body.dataEnabled
+      ? `Data collection ON.${released ? ` ${released} reading(s) received while it was off are now visible to the user.` : ""}`
+      : "Data collection OFF. The ESP32 stays connected; its readings are held (hidden) until you turn it back on.",
+    meter: publicMeter(meter)
+  });
 });
 
 // ---------- User ----------
 app.get("/api/user/meters", auth, async (req, res) => {
   const meters = await Meter.find({ userId: req.user._id }).populate("userId", "name email").lean();
   res.json(meters.map(publicMeter));
-});
-
-app.put("/api/user/meters/:meterId/command", auth, async (req, res) => {
-  const command = String(req.body.command || "").toUpperCase();
-  if (!["ON", "OFF"].includes(command)) return res.status(400).json({ message: "Command must be ON or OFF" });
-  const owned = await ownMeter(req, res, "userRelayAllowed");
-  if (!owned) return;
-  const meter = await Meter.findByIdAndUpdate(owned._id, { command }, { new: true }).populate("userId", "name email");
-  await logActivity(req.user, "relay-command", meter.meterId, command);
-  res.json({ message: `Command ${command} saved`, meter: publicMeter(meter) });
 });
 
 // Everything the administrator has set up that applies to this user's meters (read-only for users).
@@ -1119,7 +1262,7 @@ app.get("/api/user/assigned-config", auth, async (req, res) => {
     BillingSettings.findOne({ key: "default" }).lean(),
     ReportSettings.findOne({ key: "default" }).lean()
   ]);
-  const meters = await Meter.find({ userId: req.user._id }).select("meterId meterName userRelayAllowed userConfigAllowed updateFrequency").lean();
+  const meters = await Meter.find({ userId: req.user._id }).select("meterId meterName dataEnabled userConfigAllowed updateFrequency").lean();
   const { _id, key, createdAt, updatedAt, __v, ...billing } = settings || {};
   res.json({
     slabs: slabs.map(({ name, minKwh, maxKwh, ratePerKwh }) => ({ name, minKwh, maxKwh, ratePerKwh })),
@@ -1172,13 +1315,13 @@ app.get("/api/meters/:meterId/export.csv", auth, async (req, res) => {
   if (!meter) return res.status(404).json({ message: "Meter not found" });
   if (req.user.role !== "Admin" && String(meter.userId) !== String(req.user._id)) return res.status(403).json({ message: "Access denied" });
   const days = Math.max(1, Math.min(90, Number(req.query.days) || 7));
-  const rows = await Reading.find({ meterId: meter.meterId, createdAt: { $gte: new Date(Date.now() - days * 86400000) } })
+  const rows = await Reading.find({ meterId: meter.meterId, status: { $ne: 0 }, createdAt: { $gte: new Date(Date.now() - days * 86400000) } })
     .sort({ createdAt: 1 }).limit(50000).lean();
   const cell = v => v == null ? "" : v;
-  const csv = ["time_ist,voltage_v,current_a,power_w,energy_kwh,frequency_hz,power_factor,relay"]
+  const csv = ["time_ist,voltage_v,current_a,power_w,energy_kwh,frequency_hz,power_factor"]
     .concat(rows.map(r => [
       new Date(r.createdAt).toLocaleString("sv-SE", { timeZone: "Asia/Kolkata" }),
-      cell(r.voltage), cell(r.current), cell(r.power), cell(r.energy), cell(r.frequency), cell(r.powerFactor), cell(r.status)
+      cell(r.voltage), cell(r.current), cell(r.power), cell(r.energy), cell(r.frequency), cell(r.powerFactor)
     ].join(","))).join("\n");
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", `attachment; filename="${meter.meterId}-${days}d.csv"`);
@@ -1241,7 +1384,7 @@ app.get("/api/meters/:meterId/consumption", auth, async (req, res) => {
   const monthStart = indiaMonthStart(end, 1, -11);
 
   const monthlyRows = await Reading.aggregate([
-    { $match: { meterId: meter.meterId, energy: { $type: "number" }, createdAt: { $gte: monthStart, $lte: end } } },
+    { $match: { meterId: meter.meterId, status: { $ne: 0 }, energy: { $type: "number" }, createdAt: { $gte: monthStart, $lte: end } } },
     { $sort: { createdAt: 1 } },
     { $group: {
       _id: { $dateToString: { format: "%Y-%m", date: "$createdAt", timezone: "Asia/Kolkata" } },
@@ -1261,7 +1404,9 @@ app.get("/api/meters/:meterId/consumption", auth, async (req, res) => {
 
   const slabs = await TariffSlab.find().sort({ minKwh: 1 }).lean();
   const periodKwh = sumMeasured(daily);
-  const settings = await BillingSettings.findOne({ key: "default" }).lean() || {};
+  let settings = await BillingSettings.findOne({ key: "default" }).lean() || {};
+  // The meter's owner sees alerts against their own limits where they have set any.
+  if (req.user.role !== "Admin") settings = { ...settings, ...userLimitOverrides(req.user) };
   const { start: cycleStart, end: cycleEnd, previousStart, previousEnd } = billingPeriod(end, settings.billingCycleStartDay || 1);
   const monthKwh = await periodConsumption(meter.meterId, cycleStart, end);
   const previousMonthKwh = await periodConsumption(meter.meterId, previousStart, previousEnd);
@@ -1285,7 +1430,7 @@ app.get("/api/meters/:meterId/consumption", auth, async (req, res) => {
   const previousCalendarMonthBill = calculateBill(previousCalendarMonthKwh, slabs, settings);
 
   const hourlyRows = await Reading.aggregate([
-    { $match: { meterId: meter.meterId, energy: { $type: "number" }, createdAt: { $gte: start, $lte: end } } },
+    { $match: { meterId: meter.meterId, status: { $ne: 0 }, energy: { $type: "number" }, createdAt: { $gte: start, $lte: end } } },
     { $sort: { createdAt: 1 } },
     { $group: {
       _id: { $dateToString: { format: "%m-%d %H", date: "$createdAt", timezone: "Asia/Kolkata" } },
@@ -1314,9 +1459,9 @@ app.get("/api/meters/:meterId/consumption", auth, async (req, res) => {
   }
 
   const peakReading = await Reading.findOne({
-    meterId: meter.meterId, power: { $type: "number" }, createdAt: { $gte: start, $lte: end }
+    meterId: meter.meterId, status: { $ne: 0 }, power: { $type: "number" }, createdAt: { $gte: start, $lte: end }
   }).sort({ power: -1 }).select("power createdAt").lean();
-  const recentReadings = await Reading.find({ meterId: meter.meterId, power: { $type: "number" } })
+  const recentReadings = await Reading.find({ meterId: meter.meterId, status: { $ne: 0 }, power: { $type: "number" } })
     .sort({ createdAt: -1 }).limit(2).select("power createdAt").lean();
   const priorDaily = daily.slice(-8, -1).filter(row => row.kwh != null);
   const averageDailyKwh = priorDaily.length ? priorDaily.reduce((sum, row) => sum + row.kwh, 0) / priorDaily.length : null;
@@ -1405,7 +1550,7 @@ app.get("/api/meters/:meterId/history", auth, async (req, res) => {
   if (!meter) return res.status(404).json({ message: "Meter not found" });
   if (req.user.role !== "Admin" && String(meter.userId) !== String(req.user._id)) return res.status(403).json({ message: "Access denied" });
   const limit = Math.max(10, Math.min(500, Number(req.query.limit || 100)));
-  const rows = await Reading.find({ meterId: meter.meterId }).sort({ createdAt: -1 }).limit(limit).lean();
+  const rows = await Reading.find({ meterId: meter.meterId, status: { $ne: 0 } }).sort({ createdAt: -1 }).limit(limit).lean();
   res.json(rows.reverse());
 });
 
@@ -1494,20 +1639,24 @@ app.post("/api/admin/smtp/test", auth, adminOnly, async (req, res) => {
     if (!config.host || !config.username || !config.password) {
       return res.status(400).json({ message: "Save complete SMTP settings and an app password before testing." });
     }
-    const transporter = createSmtpTransport(config);
-    await transporter.verify();
-    await transporter.sendMail({
-      from: config.from,
-      to: req.user.email,
+    // The test goes to the signed-in admin, or to any registered user the admin picks.
+    let recipient = req.user.email;
+    if (req.body.to) {
+      const target = await User.findOne({ email: String(req.body.to).toLowerCase().trim(), active: true }).select("email");
+      if (!target) return res.status(400).json({ message: "That address does not belong to an active user." });
+      recipient = target.email;
+    }
+    await createSmtpTransport(config).verify();
+    await deliverMail(recipient, {
       subject: "Smart Energy Meter SMTP test",
-      text: `SMTP is configured and working for password reset emails.\nTest requested by ${req.user.email}.`
-    });
+      text: `SMTP is configured and working.\nTest requested by ${req.user.email}.`
+    }, "SMTP test");
     const lastTestedAt = new Date();
     await SmtpSettings.updateOne({ key: "default" }, { $set: { lastTestedAt } });
-    res.json({ message: `Test email sent to ${req.user.email}.`, lastTestedAt });
+    res.json({ message: `Test email sent to ${recipient}.`, lastTestedAt });
   } catch (error) {
     console.error("SMTP test failed:", error.message);
-    res.status(502).json({ message: "SMTP test failed. Check the host, port, username, app password, and sender, then try again." });
+    res.status(502).json({ message: `SMTP test failed: ${error.message}` });
   }
 });
 
@@ -1660,11 +1809,657 @@ app.get("/api/meters/:meterId", auth, async (req, res) => {
   res.json(publicMeter(meter));
 });
 
+// ---------- Subscription wallet ----------
+// The wallet pays for the monitoring SERVICE (a subscription per meter). It is unrelated to the
+// electricity cost estimates, which are informational only.
+const UPLOAD_DIR = path.join(__dirname, "uploads");
+const rupees = paise => Number((paise / 100).toFixed(2));
+const OBJECT_ID = /^[a-f\d]{24}$/i;
+const MAX_RECHARGE_PAISE = 10000000; // Rs 1,00,000 per request
+const IMAGE_TYPES = {
+  png: { ext: "png", mime: "image/png", ok: b => b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 },
+  jpeg: { ext: "jpg", mime: "image/jpeg", ok: b => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
+  webp: { ext: "webp", mime: "image/webp", ok: b => b.toString("ascii", 0, 4) === "RIFF" && b.toString("ascii", 8, 12) === "WEBP" }
+};
+
+function badRequest(message, status = 400) {
+  return Object.assign(new Error(message), { status });
+}
+
+// Validates a data:image/...;base64 upload (type, size and magic bytes) and stores it under uploads/.
+async function saveImage(dataUrl, baseName) {
+  const match = /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/=]+)$/.exec(String(dataUrl || ""));
+  if (!match) throw badRequest("Upload a PNG, JPG or WebP image.");
+  const type = IMAGE_TYPES[match[1]];
+  const bytes = Buffer.from(match[2], "base64");
+  if (bytes.length < 200 || bytes.length > 3.5 * 1024 * 1024) throw badRequest("The image must be under 3.5 MB.");
+  if (!type.ok(bytes)) throw badRequest("That file is not a valid image.");
+  await fs.promises.mkdir(UPLOAD_DIR, { recursive: true });
+  const file = `${baseName}.${type.ext}`;
+  await fs.promises.writeFile(path.join(UPLOAD_DIR, file), bytes);
+  return file;
+}
+
+function sendImage(res, file) {
+  const match = /\.(png|jpg|webp)$/.exec(file || "");
+  if (!match || !/^[a-f\d]{24}\.|^qr-\d+\./.test(file)) return res.status(404).json({ message: "Image not found" });
+  const mime = Object.values(IMAGE_TYPES).find(type => type.ext === match[1]).mime;
+  res.setHeader("Content-Type", mime);
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Cache-Control", "private, max-age=300");
+  res.sendFile(path.join(UPLOAD_DIR, file), error => { if (error && !res.headersSent) res.status(404).json({ message: "Image not found" }); });
+}
+
+async function removeUpload(file) {
+  if (file && /^[\w.-]+$/.test(file)) await fs.promises.unlink(path.join(UPLOAD_DIR, file)).catch(() => {});
+}
+
+async function creditWallet(userId, paise, fields) {
+  const user = await User.findByIdAndUpdate(userId, { $inc: { walletBalancePaise: paise } }, { new: true }).select("walletBalancePaise");
+  await WalletTxn.create({ userId, type: "credit", amountPaise: paise, balanceAfterPaise: user.walletBalancePaise, ...fields });
+  return user.walletBalancePaise;
+}
+
+// Atomic: the balance can never go negative. Returns the new balance, or null when funds are insufficient.
+async function debitWallet(userId, paise, fields) {
+  const user = await User.findOneAndUpdate({ _id: userId, walletBalancePaise: { $gte: paise } }, { $inc: { walletBalancePaise: -paise } }, { new: true }).select("walletBalancePaise");
+  if (!user) return null;
+  await WalletTxn.create({ userId, type: "debit", amountPaise: paise, balanceAfterPaise: user.walletBalancePaise, ...fields });
+  return user.walletBalancePaise;
+}
+
+// New end date when `days` are added: from the current end if still running, otherwise from now.
+function extendedEnd(meter, days) {
+  const current = meter.subscriptionEnd ? new Date(meter.subscriptionEnd).getTime() : 0;
+  return new Date(Math.max(current, Date.now()) + days * 86400000);
+}
+
+// An admin-disabled meter stays disabled when its subscription is renewed.
+function renewalPatch(meter, end) {
+  const set = { subscriptionEnd: end, expiryReminderFor: "" };
+  if (meter.dataEnabled !== false || meter.disabledReason === "subscription") Object.assign(set, { dataEnabled: true, disabledReason: "" });
+  return set;
+}
+
+async function activatePlan(user, meter, plan, reason) {
+  const balance = await debitWallet(user._id, plan.pricePaise, { reason, note: `${plan.name} (${plan.days} days)`, meterId: meter.meterId });
+  if (balance === null) return null;
+  const end = extendedEnd(meter, plan.days);
+  const patch = renewalPatch(meter, end);
+  await Meter.updateOne({ _id: meter._id }, { $set: patch });
+  const released = patch.dataEnabled ? await releaseHeldReadings(meter.meterId) : 0;
+  return { balance, end, released };
+}
+
+const istDateTime = date => new Date(date).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+const money2 = paise => `₹${(paise / 100).toFixed(2)}`;
+
+// Short notification mail to a user; failures are recorded in the activity log by deliverMail.
+async function notifyUser(user, subject, lines, kind) {
+  const html = `<div style="padding:28px 12px;background:#f1f5f9;font-family:Arial,sans-serif;color:#172033"><main style="max-width:560px;margin:auto;padding:28px;background:#fff;border:1px solid #e2e8f0;border-radius:16px"><p style="margin:0 0 8px;color:#2563eb;font-weight:700">SMART ENERGY METER</p><h1 style="margin:0 0 12px;font-size:22px">${escapeHtml(subject)}</h1><p>Hello ${escapeHtml(user.name || "there")},</p>${lines.map(l => `<p style="line-height:1.6">${escapeHtml(l)}</p>`).join("")}</main></div>`;
+  try {
+    await deliverMail(user.email, { subject: `Smart Energy Meter — ${subject}`, text: `Hello ${user.name || "there"},\n\n${lines.join("\n\n")}`, html }, kind);
+    return true;
+  } catch (error) {
+    console.error(`${kind} e-mail to ${user.email} failed:`, error.message);
+    return false;
+  }
+}
+
+function receiptEmail(user, payment, balancePaise) {
+  const rows = [
+    ["Receipt no.", payment.receiptNo], ["Date", istDateTime(payment.reviewedAt)], ["Amount credited", money2(payment.amountPaise)],
+    ["UPI reference (UTR)", payment.utr], ["Wallet balance now", money2(balancePaise)], ["Approved by", "Smart Energy Meter administrator"]
+  ];
+  const html = `<div style="padding:28px 12px;background:#f1f5f9;font-family:Arial,sans-serif;color:#172033"><main style="max-width:560px;margin:auto;padding:28px;background:#fff;border:1px solid #e2e8f0;border-radius:16px"><p style="margin:0 0 8px;color:#2563eb;font-weight:700">SMART ENERGY METER</p><h1 style="margin:0 0 4px;font-size:22px">Payment received ✓</h1><p style="color:#64748b;margin:0 0 16px">Hello ${escapeHtml(user.name || "there")}, your wallet recharge was approved.</p><table style="width:100%;border-collapse:collapse">${rows.map(([k, v]) => `<tr><td style="padding:9px 6px;border-bottom:1px solid #e2e8f0;color:#64748b">${k}</td><td style="padding:9px 6px;border-bottom:1px solid #e2e8f0;font-weight:700;text-align:right">${escapeHtml(v)}</td></tr>`).join("")}</table><p style="color:#64748b;font-size:12px;margin-top:16px">This is a receipt for a prepaid wallet top-up used to pay the meter-monitoring subscription. It is not an electricity bill.</p></main></div>`;
+  const text = `Payment received\n\n${rows.map(([k, v]) => `${k}: ${v}`).join("\n")}\n\nThis is a receipt for a prepaid wallet top-up for the meter-monitoring subscription, not an electricity bill.`;
+  return { subject: `Smart Energy Meter — Payment receipt ${payment.receiptNo}`, text, html };
+}
+
+function paymentView(p) {
+  return { _id: p._id, amount: rupees(p.amountPaise), utr: p.utr, status: p.status, receiptNo: p.receiptNo, adminNote: p.adminNote, createdAt: p.createdAt, reviewedAt: p.reviewedAt };
+}
+
+function planView(p) {
+  return { _id: p._id, name: p.name, price: rupees(p.pricePaise), days: p.days, active: p.active };
+}
+
+async function paymentConfig() {
+  const s = await getAppSettings();
+  return { upiId: s.upiId || "", payeeName: s.payeeName || "", instructions: s.payInstructions || "", minRecharge: rupees(s.minRechargePaise ?? 1000), hasQr: Boolean(s.qrFile) };
+}
+
+// --- user side ---
+app.get("/api/user/wallet", auth, async (req, res) => {
+  const [user, txns, payments, plans, pay, meters] = await Promise.all([
+    User.findById(req.user._id).select("walletBalancePaise").lean(),
+    WalletTxn.find({ userId: req.user._id }).sort({ createdAt: -1 }).limit(50).lean(),
+    PaymentRequest.find({ userId: req.user._id }).sort({ createdAt: -1 }).limit(20).lean(),
+    Plan.find({ active: true }).sort({ pricePaise: 1 }).lean(),
+    paymentConfig(),
+    Meter.find({ userId: req.user._id }).lean()
+  ]);
+  res.json({
+    balance: rupees(user?.walletBalancePaise || 0),
+    txns: txns.map(t => ({ _id: t._id, type: t.type, amount: rupees(t.amountPaise), balanceAfter: rupees(t.balanceAfterPaise), reason: t.reason, note: t.note, meterId: t.meterId, createdAt: t.createdAt })),
+    payments: payments.map(paymentView),
+    plans: plans.map(planView),
+    pay,
+    meters: meters.map(m => {
+      const v = publicMeter(m);
+      return { meterId: v.meterId, meterName: v.meterName, online: v.online, dataEnabled: v.dataEnabled, disabledReason: v.disabledReason,
+        subscriptionEnd: v.subscriptionEnd || null, daysLeft: v.daysLeft, subscriptionExpired: v.subscriptionExpired, autoRenewPlanId: m.autoRenewPlanId || null };
+    })
+  });
+});
+
+app.post("/api/user/payments", auth, uploadJson, async (req, res) => {
+  let file = "";
+  try {
+    const pay = await paymentConfig();
+    if (!pay.upiId && !pay.hasQr) return res.status(503).json({ message: "Payments are not set up yet. Please contact the administrator." });
+    const amountPaise = Math.round(Number(req.body.amount) * 100);
+    if (!Number.isFinite(amountPaise) || amountPaise < Math.round(pay.minRecharge * 100) || amountPaise > MAX_RECHARGE_PAISE) {
+      return res.status(400).json({ message: `Enter an amount between ₹${pay.minRecharge} and ₹${MAX_RECHARGE_PAISE / 100}.` });
+    }
+    const utr = String(req.body.utr || "").trim().toUpperCase().replace(/\s+/g, "");
+    if (!/^[A-Z0-9]{6,30}$/.test(utr)) return res.status(400).json({ message: "Enter the UPI reference / UTR number shown in your payment app (6-30 letters or digits)." });
+    if (await PaymentRequest.countDocuments({ userId: req.user._id, status: "pending" }) >= 5) {
+      return res.status(429).json({ message: "You already have 5 payments waiting for approval. Please wait for the administrator to review them." });
+    }
+    file = await saveImage(req.body.screenshot, crypto.randomBytes(12).toString("hex"));
+    let payment;
+    try {
+      payment = await PaymentRequest.create({ userId: req.user._id, amountPaise, utr, screenshotFile: file });
+    } catch (error) {
+      await removeUpload(file);
+      if (error.code === 11000) return res.status(409).json({ message: "A payment with this UTR was already submitted." });
+      throw error;
+    }
+    await logActivity(req.user, "payment-submitted", req.user.email, `${money2(amountPaise)} UTR ${utr}`);
+    res.status(201).json({ message: "Payment submitted. The administrator will verify it and your wallet will be credited after approval.", payment: paymentView(payment) });
+    // Tell the admins there is something to review (best effort, after responding).
+    User.find({ role: "Admin", active: true }).select("name email").lean().then(admins => Promise.all(admins.map(admin =>
+      notifyUser(admin, "Payment waiting for approval", [`${req.user.name} (${req.user.email}) submitted ${money2(amountPaise)} (UTR ${utr}). Open Payments in the admin dashboard to review the screenshot.`], "payment pending")))).catch(() => {});
+  } catch (error) {
+    await removeUpload(file);
+    if (error.status) return res.status(error.status).json({ message: error.message });
+    console.error("Payment submit failed:", error);
+    res.status(500).json({ message: "Could not submit the payment." });
+  }
+});
+
+app.get("/api/payments/:id/screenshot", auth, async (req, res) => {
+  if (!OBJECT_ID.test(req.params.id)) return res.status(404).json({ message: "Not found" });
+  const payment = await PaymentRequest.findById(req.params.id).lean();
+  if (!payment || (req.user.role !== "Admin" && String(payment.userId) !== String(req.user._id))) return res.status(404).json({ message: "Not found" });
+  sendImage(res, payment.screenshotFile);
+});
+
+app.get("/api/payment/qr", auth, async (req, res) => {
+  const settings = await getAppSettings();
+  if (!settings.qrFile) return res.status(404).json({ message: "No QR uploaded" });
+  sendImage(res, settings.qrFile);
+});
+
+app.post("/api/user/meters/:meterId/subscribe", auth, async (req, res) => {
+  const meter = await ownMeter(req, res);
+  if (!meter) return;
+  const plan = OBJECT_ID.test(String(req.body.planId)) ? await Plan.findOne({ _id: req.body.planId, active: true }) : null;
+  if (!plan) return res.status(400).json({ message: "Choose an available plan." });
+  const result = await activatePlan(req.user, meter, plan, "subscription");
+  if (!result) return res.status(402).json({ message: `Your wallet has too little balance for ${plan.name} (${money2(plan.pricePaise)}). Recharge your wallet first.` });
+  await logActivity(req.user, "subscription", meter.meterId, `${plan.name} until ${istDateTime(result.end)}`);
+  notifyUser(req.user, "Subscription active", [`${meter.meterName || meter.meterId} is subscribed until ${istDateTime(result.end)} (${plan.name}, ${money2(plan.pricePaise)} paid from your wallet). Remaining balance: ${money2(result.balance)}.`], "subscription");
+  res.json({ message: `Subscribed until ${istDateTime(result.end)}.`, balance: rupees(result.balance), subscriptionEnd: result.end });
+});
+
+app.put("/api/user/meters/:meterId/auto-renew", auth, async (req, res) => {
+  const meter = await ownMeter(req, res);
+  if (!meter) return;
+  let planId = null;
+  if (req.body.planId) {
+    const plan = OBJECT_ID.test(String(req.body.planId)) ? await Plan.findOne({ _id: req.body.planId, active: true }).lean() : null;
+    if (!plan) return res.status(400).json({ message: "Choose an available plan." });
+    planId = plan._id;
+  }
+  await Meter.updateOne({ _id: meter._id }, { $set: { autoRenewPlanId: planId } });
+  res.json({ message: planId ? "Auto-renew is on. The wallet will be charged when the subscription ends." : "Auto-renew is off." });
+});
+
+// --- admin side ---
+app.get("/api/admin/payment-settings", auth, adminOnly, async (req, res) => res.json(await paymentConfig()));
+
+app.put("/api/admin/payment-settings", auth, adminOnly, async (req, res) => {
+  const upiId = String(req.body.upiId || "").trim();
+  const payeeName = String(req.body.payeeName || "").trim();
+  const instructions = String(req.body.instructions || "").trim().slice(0, 400);
+  const minRecharge = Number(req.body.minRecharge);
+  if (upiId && !/^[\w.\-]{2,256}@[a-zA-Z][a-zA-Z0-9.\-]{1,64}$/.test(upiId)) return res.status(400).json({ message: "Enter a valid UPI ID such as name@bank." });
+  if (payeeName.length > 80) return res.status(400).json({ message: "Payee name must be 80 characters or fewer." });
+  if (!Number.isFinite(minRecharge) || minRecharge < 1 || minRecharge > 100000) return res.status(400).json({ message: "Minimum recharge must be between ₹1 and ₹1,00,000." });
+  await AppSettings.updateOne({ key: "default" }, { $set: { upiId, payeeName, payInstructions: instructions, minRechargePaise: Math.round(minRecharge * 100) } }, { upsert: true });
+  await logActivity(req.user, "payment-settings", upiId || "(no UPI id)", "updated");
+  res.json({ message: "Payment settings saved.", ...(await paymentConfig()) });
+});
+
+app.post("/api/admin/payment-qr", auth, adminOnly, uploadJson, async (req, res) => {
+  try {
+    const settings = await getAppSettings();
+    const file = await saveImage(req.body.image, `qr-${Date.now()}`);
+    await AppSettings.updateOne({ key: "default" }, { $set: { qrFile: file } });
+    await removeUpload(settings.qrFile);
+    await logActivity(req.user, "payment-qr", "uploaded");
+    res.json({ message: "Payment QR uploaded." });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ message: error.message });
+    console.error("QR upload failed:", error);
+    res.status(500).json({ message: "Could not save the QR image." });
+  }
+});
+
+app.delete("/api/admin/payment-qr", auth, adminOnly, async (req, res) => {
+  const settings = await getAppSettings();
+  await AppSettings.updateOne({ key: "default" }, { $set: { qrFile: "" } });
+  await removeUpload(settings.qrFile);
+  res.json({ message: "Payment QR removed." });
+});
+
+app.get("/api/admin/payments", auth, adminOnly, async (req, res) => {
+  const filter = ["pending", "approved", "rejected"].includes(req.query.status) ? { status: req.query.status } : {};
+  const [rows, pending] = await Promise.all([
+    PaymentRequest.find(filter).sort({ createdAt: -1 }).limit(200).populate("userId", "name email").lean(),
+    PaymentRequest.countDocuments({ status: "pending" })
+  ]);
+  res.json({ pending, payments: rows.map(p => ({ ...paymentView(p), user: p.userId ? { name: p.userId.name, email: p.userId.email } : null, reviewedBy: p.reviewedBy })) });
+});
+
+app.post("/api/admin/payments/:id/approve", auth, adminOnly, async (req, res) => {
+  if (!OBJECT_ID.test(req.params.id)) return res.status(404).json({ message: "Payment not found" });
+  const existing = await PaymentRequest.findById(req.params.id).lean();
+  if (!existing) return res.status(404).json({ message: "Payment not found" });
+  let amountPaise = existing.amountPaise;
+  if (req.body.amount !== undefined && req.body.amount !== "") {
+    amountPaise = Math.round(Number(req.body.amount) * 100);
+    if (!Number.isFinite(amountPaise) || amountPaise < 100 || amountPaise > MAX_RECHARGE_PAISE) return res.status(400).json({ message: "Enter a valid amount to credit." });
+  }
+  const day = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }).replaceAll("-", "");
+  // Claiming pending -> approved first makes a double click or two admins crediting twice impossible.
+  const payment = await PaymentRequest.findOneAndUpdate(
+    { _id: existing._id, status: "pending" },
+    { $set: { status: "approved", amountPaise, receiptNo: `RCP-${day}-${String(existing._id).slice(-6).toUpperCase()}`, reviewedBy: req.user.email, reviewedAt: new Date(), adminNote: String(req.body.note || "").slice(0, 240) } },
+    { new: true }
+  );
+  if (!payment) return res.status(409).json({ message: "This payment was already reviewed." });
+  let balance;
+  try {
+    balance = await creditWallet(payment.userId, amountPaise, { reason: "recharge", note: `UPI ${payment.utr} · ${payment.receiptNo}`, paymentId: payment._id, by: req.user.email });
+  } catch (error) {
+    await PaymentRequest.updateOne({ _id: payment._id }, { $set: { status: "pending", receiptNo: "", reviewedBy: "", reviewedAt: null } });
+    console.error("Wallet credit failed:", error);
+    return res.status(500).json({ message: "Could not credit the wallet; the payment is still pending." });
+  }
+  await logActivity(req.user, "payment-approved", payment.receiptNo, `${money2(amountPaise)} for user ${payment.userId}`);
+  const user = await User.findById(payment.userId).select("name email").lean();
+  let emailed = false;
+  if (user) {
+    try {
+      await deliverMail(user.email, receiptEmail(user, payment, balance), `receipt ${payment.receiptNo}`);
+      emailed = true;
+    } catch (error) {
+      console.error("Receipt e-mail failed:", error.message);
+    }
+  }
+  checkSubscriptions(); // lets an expired auto-renew meter pick up the new balance immediately
+  res.json({ message: emailed ? `Approved. ${money2(amountPaise)} credited and receipt e-mailed to ${user.email}.` : `Approved and credited, but the receipt e-mail could not be sent (see Activity log → E-mail deliveries).`, emailed });
+});
+
+app.post("/api/admin/payments/:id/reject", auth, adminOnly, async (req, res) => {
+  if (!OBJECT_ID.test(req.params.id)) return res.status(404).json({ message: "Payment not found" });
+  const note = String(req.body.note || "").trim().slice(0, 240);
+  if (!note) return res.status(400).json({ message: "Give the user a reason for rejecting this payment." });
+  const payment = await PaymentRequest.findOneAndUpdate({ _id: req.params.id, status: "pending" },
+    { $set: { status: "rejected", adminNote: note, reviewedBy: req.user.email, reviewedAt: new Date() } }, { new: true });
+  if (!payment) return res.status(409).json({ message: "This payment was already reviewed or does not exist." });
+  await logActivity(req.user, "payment-rejected", payment.utr, note);
+  const user = await User.findById(payment.userId).select("name email").lean();
+  if (user) notifyUser(user, "Payment not approved", [`Your payment of ${money2(payment.amountPaise)} (UTR ${payment.utr}) could not be approved.`, `Reason: ${note}`, "If you believe this is a mistake, submit the payment again with a clear screenshot or contact your administrator."], "payment rejected");
+  res.json({ message: "Payment rejected and the user was notified." });
+});
+
+app.get("/api/admin/subscriptions", auth, adminOnly, async (req, res) => {
+  const [users, meters, plans] = await Promise.all([
+    User.find({ role: "User" }).select("name email active walletBalancePaise").sort({ name: 1 }).lean(),
+    Meter.find().populate("userId", "name email").sort({ meterId: 1 }).lean(),
+    Plan.find().sort({ pricePaise: 1 }).lean()
+  ]);
+  res.json({
+    users: users.map(u => ({ _id: u._id, name: u.name, email: u.email, active: u.active, balance: rupees(u.walletBalancePaise || 0) })),
+    meters: meters.map(m => { const v = publicMeter(m); return { meterId: v.meterId, meterName: v.meterName, user: v.user, online: v.online, dataEnabled: v.dataEnabled,
+      disabledReason: v.disabledReason, subscriptionEnd: v.subscriptionEnd || null, daysLeft: v.daysLeft, subscriptionExpired: v.subscriptionExpired }; }),
+    plans: plans.map(planView)
+  });
+});
+
+function parsePlan(body) {
+  const name = String(body.name || "").trim();
+  const price = Number(body.price);
+  const days = Number(body.days);
+  if (!name || name.length > 60) throw badRequest("Plan name must be 1 to 60 characters.");
+  if (!Number.isFinite(price) || price < 1 || price > 100000) throw badRequest("Plan price must be between ₹1 and ₹1,00,000.");
+  if (!Number.isInteger(days) || days < 1 || days > 3660) throw badRequest("Plan length must be 1 to 3660 days.");
+  return { name, pricePaise: Math.round(price * 100), days };
+}
+
+app.post("/api/admin/plans", auth, adminOnly, async (req, res) => {
+  try {
+    const plan = await Plan.create(parsePlan(req.body));
+    await logActivity(req.user, "plan-created", plan.name, `${money2(plan.pricePaise)} / ${plan.days} days`);
+    res.status(201).json({ message: "Plan created.", plan: planView(plan) });
+  } catch (error) { res.status(error.status || 500).json({ message: error.status ? error.message : "Could not create the plan." }); }
+});
+
+app.put("/api/admin/plans/:id", auth, adminOnly, async (req, res) => {
+  try {
+    if (!OBJECT_ID.test(req.params.id)) return res.status(404).json({ message: "Plan not found" });
+    const updates = req.body.name !== undefined ? parsePlan(req.body) : {};
+    if (req.body.active !== undefined) {
+      if (typeof req.body.active !== "boolean") return res.status(400).json({ message: "active must be true or false" });
+      updates.active = req.body.active;
+    }
+    const plan = await Plan.findByIdAndUpdate(req.params.id, { $set: updates }, { new: true });
+    if (!plan) return res.status(404).json({ message: "Plan not found" });
+    res.json({ message: "Plan saved.", plan: planView(plan) });
+  } catch (error) { res.status(error.status || 500).json({ message: error.status ? error.message : "Could not save the plan." }); }
+});
+
+app.delete("/api/admin/plans/:id", auth, adminOnly, async (req, res) => {
+  if (!OBJECT_ID.test(req.params.id)) return res.status(404).json({ message: "Plan not found" });
+  await Plan.deleteOne({ _id: req.params.id });
+  await Meter.updateMany({ autoRenewPlanId: req.params.id }, { $set: { autoRenewPlanId: null } });
+  res.json({ message: "Plan deleted." });
+});
+
+app.post("/api/admin/users/:id/wallet", auth, adminOnly, async (req, res) => {
+  if (!OBJECT_ID.test(req.params.id)) return res.status(404).json({ message: "User not found" });
+  const user = await User.findOne({ _id: req.params.id, role: "User" }).select("name email").lean();
+  if (!user) return res.status(404).json({ message: "User not found" });
+  const amountPaise = Math.round(Number(req.body.amount) * 100);
+  const type = req.body.type === "debit" ? "debit" : "credit";
+  const note = String(req.body.note || "").trim().slice(0, 240);
+  if (!Number.isFinite(amountPaise) || amountPaise < 100 || amountPaise > MAX_RECHARGE_PAISE) return res.status(400).json({ message: "Enter an amount between ₹1 and ₹1,00,000." });
+  if (!note) return res.status(400).json({ message: "Add a note explaining this adjustment." });
+  const fields = { reason: type === "credit" ? "admin-credit" : "admin-debit", note, by: req.user.email };
+  const balance = type === "credit" ? await creditWallet(user._id, amountPaise, fields) : await debitWallet(user._id, amountPaise, fields);
+  if (balance === null) return res.status(400).json({ message: "The wallet balance is lower than that amount." });
+  await logActivity(req.user, `wallet-${type}`, user.email, `${money2(amountPaise)} — ${note}`);
+  if (type === "credit") notifyUser(user, "Wallet credited", [`${money2(amountPaise)} was added to your wallet by the administrator (${note}). New balance: ${money2(balance)}.`], "wallet credit");
+  checkSubscriptions();
+  res.json({ message: `Wallet ${type === "credit" ? "credited" : "debited"}. New balance ${money2(balance)}.`, balance: rupees(balance) });
+});
+
+app.put("/api/admin/meters/:meterId/subscription", auth, adminOnly, async (req, res) => {
+  const meter = await Meter.findOne({ meterId: req.params.meterId.toUpperCase() }).lean();
+  if (!meter) return res.status(404).json({ message: "Meter not found" });
+  let set;
+  if (req.body.clear === true) {
+    set = { subscriptionEnd: null, expiryReminderFor: "" };
+    if (meter.disabledReason === "subscription") Object.assign(set, { dataEnabled: true, disabledReason: "" });
+  } else {
+    const days = Number(req.body.days);
+    if (!Number.isInteger(days) || days < 1 || days > 3660) return res.status(400).json({ message: "Enter 1 to 3660 days to add." });
+    set = renewalPatch(meter, extendedEnd(meter, days));
+  }
+  await Meter.updateOne({ _id: meter._id }, { $set: set });
+  if (set.dataEnabled) await releaseHeldReadings(meter.meterId);
+  await logActivity(req.user, "subscription-admin", meter.meterId, req.body.clear === true ? "removed (no expiry)" : `+${req.body.days} days`);
+  res.json({ message: req.body.clear === true ? "Subscription limit removed; the meter never expires." : `Added ${req.body.days} day(s).` });
+});
+
+let subscriptionCheckRunning = false;
+async function checkSubscriptions() {
+  if (subscriptionCheckRunning) return;
+  subscriptionCheckRunning = true;
+  try {
+    const now = new Date();
+    const expired = await Meter.find({ subscriptionEnd: { $ne: null, $lte: now }, dataEnabled: { $ne: false } }).populate("userId", "name email active").lean();
+    for (const meter of expired) {
+      const user = meter.userId;
+      const label = meter.meterName || meter.meterId;
+      if (user?.active && meter.autoRenewPlanId) {
+        const plan = await Plan.findOne({ _id: meter.autoRenewPlanId, active: true }).lean();
+        const renewed = plan && await activatePlan(user, meter, plan, "auto-renew");
+        if (renewed) {
+          await logActivity(user, "auto-renew", meter.meterId, `${plan.name} until ${istDateTime(renewed.end)}`);
+          notifyUser(user, "Subscription auto-renewed", [`${label} was renewed automatically with ${plan.name} (${money2(plan.pricePaise)}). New end date: ${istDateTime(renewed.end)}. Wallet balance: ${money2(renewed.balance)}.`], "auto-renew");
+          continue;
+        }
+      }
+      const result = await Meter.updateOne({ _id: meter._id, dataEnabled: { $ne: false } }, { $set: { dataEnabled: false, disabledReason: "subscription" } });
+      if (!result.modifiedCount) continue;
+      await logActivity(null, "subscription-expired", meter.meterId, "data collection disabled automatically");
+      if (user) notifyUser(user, "Subscription expired", [`The subscription for ${label} has ended, so data collection is switched off. The meter stays connected but no new readings are saved.`, meter.autoRenewPlanId ? "Auto-renew could not charge your wallet because the balance is too low." : "Recharge your wallet and renew the subscription from the Wallet tab to resume."], "subscription expired");
+    }
+    const soon = await Meter.find({ subscriptionEnd: { $gt: now, $lte: new Date(now.getTime() + 3 * 86400000) }, userId: { $ne: null }, dataEnabled: { $ne: false } }).populate("userId", "name email active").lean();
+    for (const meter of soon) {
+      const key = new Date(meter.subscriptionEnd).toISOString();
+      if (meter.expiryReminderFor === key || !meter.userId?.active) continue;
+      await Meter.updateOne({ _id: meter._id }, { $set: { expiryReminderFor: key } });
+      notifyUser(meter.userId, "Subscription ending soon", [`The subscription for ${meter.meterName || meter.meterId} ends on ${istDateTime(meter.subscriptionEnd)}. Keep enough balance in your wallet and renew it from the Wallet tab so your readings keep being saved.`], "subscription reminder");
+    }
+  } catch (error) {
+    console.error("Subscription check failed:", error);
+  } finally {
+    subscriptionCheckRunning = false;
+  }
+}
+
+// ---------- Online / offline timeline ----------
+app.get("/api/meters/:meterId/presence", auth, async (req, res) => {
+  const meter = await Meter.findOne({ meterId: req.params.meterId.toUpperCase() }).lean();
+  if (!meter) return res.status(404).json({ message: "Meter not found" });
+  if (req.user.role !== "Admin" && String(meter.userId) !== String(req.user._id)) return res.status(403).json({ message: "Access denied" });
+
+  const today = indiaStart().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.date || "")) ? String(req.query.date) : today;
+  const dayStart = new Date(`${date}T00:00:00+05:30`);
+  if (Number.isNaN(dayStart.getTime())) return res.status(400).json({ message: "Choose a valid date." });
+  const dayEnd = new Date(dayStart.getTime() + 86400000);
+  const until = new Date(Math.min(dayEnd.getTime(), Date.now()));
+
+  const [before, events] = await Promise.all([
+    PresenceEvent.findOne({ meterId: meter.meterId, at: { $lt: dayStart } }).sort({ at: -1 }).lean(),
+    PresenceEvent.find({ meterId: meter.meterId, at: { $gte: dayStart, $lt: dayEnd } }).sort({ at: 1 }).lean()
+  ]);
+
+  const segments = [];
+  const push = (from, to, state) => {
+    if (to <= from) return;
+    segments.push({ state: state || "unknown", from, to, seconds: Math.round((to - from) / 1000) });
+  };
+  let cursor = dayStart, state = before?.state || null;
+  for (const event of events) {
+    push(cursor, event.at, state);
+    cursor = event.at;
+    state = event.state;
+  }
+  push(cursor, until, state);
+
+  const total = which => segments.filter(s => s.state === which).reduce((sum, s) => sum + s.seconds, 0);
+  res.json({
+    date, dayStart, dayEnd, segments,
+    onlineSeconds: total("online"), offlineSeconds: total("offline"), unknownSeconds: total("unknown"),
+    changes: events.map(e => ({ state: e.state, at: e.at }))
+  });
+});
+
+// ---------- Personal alert settings ----------
+app.get("/api/user/alert-prefs", auth, async (req, res) => {
+  const [user, billing] = await Promise.all([
+    User.findById(req.user._id).select("alertPrefs").lean(),
+    BillingSettings.findOne({ key: "default" }).lean()
+  ]);
+  const prefs = user?.alertPrefs || {};
+  const adminDefaults = {};
+  for (const field of USER_LIMIT_FIELDS) adminDefaults[field] = billing?.[field] ?? null;
+  res.json({
+    prefs: {
+      emailAlerts: prefs.emailAlerts === true, alertOffline: prefs.alertOffline !== false,
+      ...Object.fromEntries(USER_LIMIT_FIELDS.map(field => [field, prefs[field] ?? null]))
+    },
+    adminDefaults,
+    email: req.user.email
+  });
+});
+
+app.put("/api/user/alert-prefs", auth, async (req, res) => {
+  const updates = {};
+  for (const field of ["emailAlerts", "alertOffline"]) {
+    if (!(field in req.body)) continue;
+    if (typeof req.body[field] !== "boolean") return res.status(400).json({ message: `${field} must be true or false` });
+    updates[`alertPrefs.${field}`] = req.body[field];
+  }
+  const limits = {};
+  for (const field of USER_LIMIT_FIELDS) {
+    if (!(field in req.body)) continue;
+    const raw = req.body[field];
+    if (raw === null || raw === "") { limits[field] = null; continue; }
+    const number = Number(raw);
+    if (!Number.isFinite(number) || number < 0 || (field === "minPowerFactor" && number > 1)) {
+      return res.status(400).json({ message: `${field} must be a valid non-negative number${field === "minPowerFactor" ? " no greater than 1" : ""}` });
+    }
+    limits[field] = number;
+  }
+  const current = req.user.alertPrefs || {};
+  const minV = "minVoltage" in limits ? limits.minVoltage : current.minVoltage;
+  const maxV = "maxVoltage" in limits ? limits.maxVoltage : current.maxVoltage;
+  if (minV != null && maxV != null && minV >= maxV) return res.status(400).json({ message: "Under-voltage limit must be lower than over-voltage limit" });
+  for (const [field, value] of Object.entries(limits)) updates[`alertPrefs.${field}`] = value;
+  if (!Object.keys(updates).length) return res.status(400).json({ message: "Nothing to update" });
+  await User.updateOne({ _id: req.user._id }, { $set: updates });
+  await logActivity(req.user, "alert-settings", req.user.email, "updated own alert settings");
+  res.json({ message: "Your alert settings were saved." });
+});
+
+// ---------- Background jobs: presence sweep and e-mail alerts ----------
+let presenceSweepRunning = false;
+async function sweepPresence() {
+  if (presenceSweepRunning) return;
+  presenceSweepRunning = true;
+  try {
+    const cutoff = new Date(Date.now() - HEARTBEAT_TIMEOUT_MS);
+    const stale = await Meter.find({
+      presence: "online", $or: [{ lastHeartbeat: { $lt: cutoff } }, { lastHeartbeat: null }]
+    }).select("meterId lastHeartbeat lastSeen").lean();
+    for (const meter of stale) {
+      const claimed = await Meter.findOneAndUpdate(
+        { _id: meter._id, presence: "online", lastHeartbeat: meter.lastHeartbeat ?? null },
+        { $set: { presence: "offline" } }
+      );
+      if (claimed) await PresenceEvent.create({ meterId: meter.meterId, state: "offline", at: meter.lastHeartbeat || meter.lastSeen || new Date() });
+    }
+  } catch (error) {
+    console.error("Presence sweep failed:", error.message);
+  } finally {
+    presenceSweepRunning = false;
+  }
+}
+
+const OFFLINE_ALERT_AFTER_MS = 120000;
+const ALERT_RETRY_MS = 10 * 60000;
+const alertRetryAt = new Map();
+
+// What is wrong with this meter right now, judged against the owner's own limits (falling back to the admin's).
+function liveAlerts(meter, prefs, limits) {
+  const found = [];
+  const lastContact = meter.lastHeartbeat || meter.lastSeen;
+  if (!online(meter)) {
+    if (prefs.alertOffline !== false && lastContact && Date.now() - new Date(lastContact).getTime() > OFFLINE_ALERT_AFTER_MS) {
+      found.push({ type: "offline", message: `The meter has been offline since ${new Date(lastContact).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}.` });
+    }
+    return found;
+  }
+  if (!dataAllowed(meter)) return found;
+  if (limits.alertsEnabled === false) return found;
+  if (meter.voltage != null && limits.maxVoltage != null && meter.voltage > limits.maxVoltage) found.push({ type: "over-voltage", message: `Voltage is ${meter.voltage} V, above your ${limits.maxVoltage} V limit.` });
+  if (meter.voltage != null && limits.minVoltage != null && meter.voltage < limits.minVoltage) found.push({ type: "under-voltage", message: `Voltage is ${meter.voltage} V, below your ${limits.minVoltage} V limit.` });
+  if (meter.current != null && limits.maxCurrent != null && meter.current > limits.maxCurrent) found.push({ type: "over-current", message: `Current is ${meter.current} A, above your ${limits.maxCurrent} A limit.` });
+  if (meter.power != null && limits.maxPower != null && meter.power > limits.maxPower) found.push({ type: "over-power", message: `Power is ${meter.power} W, above your ${limits.maxPower} W limit.` });
+  if (meter.powerFactor != null && limits.minPowerFactor != null && meter.powerFactor < limits.minPowerFactor) found.push({ type: "low-power-factor", message: `Power factor is ${meter.powerFactor}, below your ${limits.minPowerFactor} limit.` });
+  return found;
+}
+
+async function sendAlertEmail(user, meter, raised, recovered, adminCopies) {
+  const label = meter.meterName || meter.meterId;
+  const subject = raised.length
+    ? `Smart Energy Meter alert — ${label}`
+    : `Smart Energy Meter — ${label} is back online`;
+  const lines = raised.length ? raised.map(a => a.message) : ["Your meter is online again and sending data."];
+  const text = `Hello ${user.name || "there"},\n\n${lines.join("\n")}\n\nMeter: ${label} (${meter.meterId})\nYou can change which alerts are e-mailed from the Insights tab of your dashboard.`;
+  const html = `<div style="padding:28px 12px;background:#f1f5f9;font-family:Arial,sans-serif;color:#172033"><main style="max-width:560px;margin:auto;padding:28px;background:#fff;border:1px solid #e2e8f0;border-radius:16px"><p style="margin:0 0 8px;color:#2563eb;font-weight:700">SMART ENERGY METER</p><h1 style="margin:0 0 12px;font-size:22px">${raised.length ? "Alert for your meter" : "Meter back online"}</h1><p>Hello ${escapeHtml(user.name || "there")},</p><ul style="padding-left:20px;line-height:1.7">${lines.map(l => `<li>${escapeHtml(l)}</li>`).join("")}</ul><p style="color:#64748b;font-size:13px">Meter: ${escapeHtml(label)} (${escapeHtml(meter.meterId)}). You can change which alerts are e-mailed from the Insights tab of your dashboard.</p></main></div>`;
+  await deliverMail(user.email, { subject, text, html }, `alert: ${(raised.length ? raised : [{ type: "back-online" }]).map(a => a.type).join(", ")}`);
+  for (const admin of adminCopies) {
+    try {
+      await deliverMail(admin.email, { subject: `[Copy for ${user.email}] ${subject}`, text, html }, "alert copy");
+    } catch { /* already recorded in the activity log */ }
+  }
+}
+
+let alertCheckRunning = false;
+async function checkAlerts() {
+  if (alertCheckRunning) return;
+  alertCheckRunning = true;
+  try {
+    const [billing, app, meters] = await Promise.all([
+      BillingSettings.findOne({ key: "default" }).lean(),
+      getAppSettings(),
+      Meter.find({ userId: { $ne: null } }).populate("userId", "name email active alertPrefs").lean()
+    ]);
+    const adminCopies = app.alertAdminCopy ? await User.find({ role: "Admin", active: true }).select("email").lean() : [];
+    for (const meter of meters) {
+      const user = meter.userId;
+      const previous = meter.activeAlerts || [];
+      if (!user?.active || user.alertPrefs?.emailAlerts !== true) {
+        if (previous.length) await Meter.updateOne({ _id: meter._id }, { $set: { activeAlerts: [] } });
+        continue;
+      }
+      const limits = { ...(billing || {}), ...userLimitOverrides(user) };
+      const current = liveAlerts(meter, user.alertPrefs, limits);
+      const types = current.map(a => a.type);
+      const raised = current.filter(a => !previous.includes(a.type));
+      const recovered = previous.includes("offline") && !types.includes("offline") && online(meter);
+      if (!raised.length && !recovered && types.length === previous.length) continue;
+      if ((raised.length || recovered) && Date.now() < (alertRetryAt.get(String(meter._id)) || 0)) continue;
+      try {
+        if (raised.length) await sendAlertEmail(user, meter, raised, false, adminCopies);
+        else if (recovered) await sendAlertEmail(user, meter, [], true, adminCopies);
+        alertRetryAt.delete(String(meter._id));
+      } catch (error) {
+        console.error(`Alert e-mail to ${user.email} failed:`, error.message);
+        alertRetryAt.set(String(meter._id), Date.now() + ALERT_RETRY_MS);
+        continue;
+      }
+      await Meter.updateOne({ _id: meter._id }, { $set: { activeAlerts: types } });
+    }
+  } catch (error) {
+    console.error("Alert check failed:", error);
+  } finally {
+    alertCheckRunning = false;
+  }
+}
+
 // SPA entry points
-app.get("/", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
+app.get("/",(req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 app.get("*", (req, res) => {
   if (req.path.startsWith("/api/")) return res.status(404).json({ message: "API route not found" });
   res.sendFile(path.join(__dirname, "public", "index.html"));
+});
+
+app.use((error, req, res, next) => {
+  if (error?.type === "entity.too.large") return res.status(413).json({ message: "That upload is too large." });
+  if (error?.type === "entity.parse.failed") return res.status(400).json({ message: "Malformed request." });
+  console.error(error);
+  res.status(500).json({ message: "Server error" });
 });
 
 let scheduledReportCheckRunning = false;
@@ -1727,10 +2522,18 @@ async function checkScheduledReports() {
   }
 }
 
-connectDB().then(() => {
+connectDB().then(async () => {
+  // Older readings stored the relay state ("ON"/"OFF") in `status`; it is now 1 (visible) or 0 (held).
+  await Reading.updateMany({ status: { $type: "string" } }, { $set: { status: 1 } });
+  await Reading.updateMany({ status: { $exists: false } }, { $set: { status: 1 } });
+}).then(() => {
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Energy Meter Server running on port ${PORT}`);
     setInterval(checkScheduledReports, 60000);
+    setInterval(sweepPresence, 10000);
+    setInterval(checkAlerts, 30000);
+    setInterval(checkSubscriptions, 60000);
+    checkSubscriptions();
   });
 }).catch(err => {
   console.error("MongoDB connection failed:", err);

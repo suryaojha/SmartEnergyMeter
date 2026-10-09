@@ -55,4 +55,31 @@ Do not work on mains wiring unless qualified. Use the installed relay/PZEM manuf
 - **Activity log** (90-day), CSV export of readings, user enable/disable and admin password set, meter rename/delete, dark mode, mobile drawer (admin) and bottom tab bar (user).
 - **Firmware v3** – no hard-coded values: server URL, meter ID, token, relay pin/polarity and PZEM pins are entered in the setup portal. Needs ArduinoJson v7, WiFiManager, PZEM-004T v30, ESP32 Arduino core 3.x. Hold BOOT 5 s to factory-reset.
 
+## v3.1 changes
+
+- **Relay removed** (firmware, API, dashboards). Replaced by an admin-only **Data collection ON/OFF** switch per meter: OFF means the ESP32 stays powered and shown online, and its readings are held hidden (status 0) until it is turned ON again. Flash firmware 3.1.0.
+- **Online history**: every online/offline change is recorded; admins and users see a 24-hour timeline per day.
+- **Activity log** now records logins, logouts and failed logins, plus every e-mail sent or failed (with the recipient). Filter by type.
+- **Readings clean-up** (admin): list readings, delete selected ones, or delete all out-of-range ("suspicious") readings.
+- **Personal alerts**: each user sets their own limits and can opt in to e-mail alerts (and offline/back-online notices) sent to their own registered address. Admins can optionally be copied.
+- **Mail test** can target any active user, and mail errors are shown instead of a generic message.
+
+See `workflows.md` for how data, payments, subscriptions and held readings flow through the system.
+
+While data collection is OFF (admin switch or expired subscription) the ESP32 keeps sending and readings are stored as `status: 0` (held, hidden from users); turning collection back on sets them to `status: 1`. Admins can also **Erase all data** of a meter permanently.
+
+## Subscription wallet
+
+The product is a **subscription**: users pay for the monitoring service, not for electricity. Cost figures on the dashboard remain estimates.
+
+- Admin defines **plans** (name, price, days) and the **UPI ID / payee / QR image** under *Wallets & plans*.
+- A user opens **Wallet**, enters an amount and gets a UPI QR with that amount filled in (plus PhonePe / Google Pay / Paytm buttons on phones), pays, then submits the UTR and a screenshot.
+- The admin reviews the screenshot under **Payments** and approves (wallet credited, receipt e-mailed with a receipt number) or rejects with a reason. Approval is atomic, a UTR can be used once, and screenshots are served only to the owner and admins.
+- The user subscribes a meter to a plan from the wallet (the balance can never go negative). **Auto-renew** per meter is optional. Admin can also add/deduct wallet money and add days to a meter.
+- When a meter's subscription ends it is **disabled automatically**: the ESP32 stays online, its readings are held (status 0) until renewal, and the user sees "online, subscription expired" (or "disabled by administrator" when the admin switched it off). Renewal re-enables it unless the admin disabled it manually. Reminders are e-mailed 3 days before expiry.
+- Meters with no end date never expire, so existing meters keep working until you give them a subscription.
+- Payment confirmation is manual (screenshot + admin approval). A payment-gateway API such as Razorpay would need a merchant account and keys, and is not included.
+
+Uploaded screenshots are stored in `uploads/` (git-ignored); back this folder up with the database.
+
 A full explanation with diagrams is in `SmartEnergyMeter_Guide.pdf`.

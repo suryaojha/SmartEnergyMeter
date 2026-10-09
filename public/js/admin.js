@@ -8,6 +8,10 @@ function openTab(tab) {
   try { history.replaceState(null, "", `#${tab}`); } catch {}
   if (tab === "consumption") loadConsumption();
   if (tab === "wifi") loadWifiStatus();
+  if (tab === "presence") loadPresence();
+  if (tab === "payments") loadPayments();
+  if (tab === "subscriptions") loadSubscriptions();
+  if (tab === "readings") loadReadings();
   if (tab === "smtp") loadSmtpSettings();
   if (tab === "reports") loadReportSettings();
   if (tab === "security") { loadSecurity(); loadOtps(); }
@@ -25,6 +29,8 @@ document.querySelectorAll(".navbtn").forEach(button => { button.onclick = () => 
   const hash = location.hash.slice(1);
   if (hash && $(hash)?.classList.contains("section")) openTab(hash);
   setInterval(() => { if (!document.hidden) loadOverview(); }, 5000);
+  loadPendingBadge();
+  setInterval(() => { if (!document.hidden) loadPendingBadge(); }, 20000);
   setInterval(() => { if (!document.hidden && $("wifi").classList.contains("active")) loadWifiStatus(); }, 5000);
 })();
 
@@ -53,7 +59,7 @@ function meterCard(meter) {
       <div class="reading"><span class="label">Power factor</span><b>${display(meter.powerFactor)}</b></div>
       <div class="reading"><span class="label">Frequency</span><b>${display(meter.frequency, " Hz")}</b></div>
     </div>
-    <div class="actions"><span class="pill ${meter.status === "ON" ? "on" : "off"}">Relay ${esc(meter.status || "--")}</span><span class="pill ${meter.userRelayAllowed ? "blue" : "off"}">User relay ${meter.userRelayAllowed ? "allowed" : "locked"}</span></div>
+    <div class="actions"><span class="pill ${meter.dataEnabled ? "on" : "off"}">Data ${meter.dataEnabled ? "ON" : "OFF (disabled by admin)"}</span></div>
     <div class="status-text">${meter.online ? `Online ${duration(meter.uptimeSeconds)}` : "Offline"} · last data ${ago(meter.lastSeen)}${meter.rssi != null ? ` · Wi-Fi ${signalLabel(meter.rssi)}` : ""}${meter.firmware ? ` · fw ${esc(meter.firmware)}` : ""}</div>
   </div>`;
 }
@@ -65,6 +71,8 @@ async function loadMeters() {
     renderMeterList();
     fillSelect("consMeter");
     fillSelect("wifiMeter");
+    fillSelect("presMeter");
+    fillSelect("readMeter");
     $("wifiScan").disabled = !meters.length;
   } catch (e) {
     toast(e.message);
@@ -85,20 +93,17 @@ function renderMeterList() {
     const id = esc(meter.meterId);
     return `<div class="meter-card" data-card="${id}">
       <div class="meter-head"><div><div class="meter-id">${esc(meter.meterName || "Unnamed meter")}</div><div class="status-text" style="margin:2px 0 0">${id}</div></div><span class="pill ${meter.online ? "online" : "offline"}">${meter.online ? "ONLINE" : "OFFLINE"}</span></div>
-      <div class="status-text">Relay <b>${esc(meter.status || "--")}</b> (wanted ${esc(meter.command || "--")}) · last data ${ago(meter.lastSeen)}${meter.devicePaired ? "" : " · <b>not paired</b>"}</div>
-      <div class="meter-actions" style="border:0;padding-top:0">
-        <button class="btn small success" data-command="ON" data-meter="${id}">Relay ON</button>
-        <button class="btn small danger" data-command="OFF" data-meter="${id}">Relay OFF</button>
-      </div>
+      <div class="status-text">${meter.online ? "ESP32 connected" : "ESP32 not connected"} · last data ${ago(meter.lastSeen)}${meter.devicePaired ? "" : " · <b>not paired</b>"}</div>
+      <div class="perm-row" style="margin-top:8px"><div><b>Data collection</b><small>ON: readings are visible to the user. OFF: the ESP32 stays connected and readings are held hidden, then released when you turn it ON again.</small></div><label class="switch"><input type="checkbox" data-dataenabled data-meter="${id}" ${meter.dataEnabled ? "checked" : ""}><i></i></label></div>
       <div class="field" style="margin-top:10px"><label>Assigned user</label>
         <select data-assignment="${id}"><option value="">Unassigned</option>${users.map(user => `<option value="${esc(user._id)}" ${String(meter.userId?._id || "") === String(user._id) ? "selected" : ""}>${esc(user.name)} — ${esc(user.email)}</option>`).join("")}</select></div>
       <div class="field" style="margin-top:10px"><label>Reading interval</label>
         <select data-frequency="${id}">${options.map(value => `<option value="${value}" ${value === freq ? "selected" : ""}>${value} sec</option>`).join("")}</select></div>
-      <div class="perm-row" style="margin-top:12px"><div><b>User may control relay</b><small>Lets the assigned user switch ON/OFF</small></div><label class="switch"><input type="checkbox" data-perm="userRelayAllowed" data-meter="${id}" ${meter.userRelayAllowed ? "checked" : ""}><i></i></label></div>
       <div class="perm-row"><div><b>User may configure meter</b><small>Rename, interval and Wi-Fi from their dashboard</small></div><label class="switch"><input type="checkbox" data-perm="userConfigAllowed" data-meter="${id}" ${meter.userConfigAllowed ? "checked" : ""}><i></i></label></div>
       <div class="meter-actions">
         <button class="btn small secondary" data-device-token="${id}">${meter.devicePaired ? "Rotate token" : "Pair device"}</button>
         <button class="btn small secondary" data-rename="${id}">Rename</button>
+        <button class="btn small danger" data-erase-meter="${id}">Erase all data</button>
         <button class="btn small danger" data-delete-meter="${id}">Delete</button>
       </div>
     </div>`;
@@ -110,22 +115,23 @@ $("meterList").addEventListener("change", event => {
   if (t.dataset.frequency) setFreq(t.dataset.frequency, t.value);
   if (t.dataset.assignment !== undefined && t.dataset.assignment) assignMeter(t.dataset.assignment, t.value);
   if (t.dataset.perm) setPermission(t.dataset.meter, t.dataset.perm, t.checked, t);
+  if (t.hasAttribute("data-dataenabled")) setDataEnabled(t.dataset.meter, t.checked, t);
 });
 $("meterList").addEventListener("click", event => {
-  const cmd = event.target.closest("[data-command]");
-  if (cmd) setCommand(cmd.dataset.meter, cmd.dataset.command);
   const tok = event.target.closest("[data-device-token]");
   if (tok) issueDeviceToken(tok.dataset.deviceToken);
   const ren = event.target.closest("[data-rename]");
   if (ren) renameMeter(ren.dataset.rename);
   const del = event.target.closest("[data-delete-meter]");
   if (del) deleteMeter(del.dataset.deleteMeter);
+  const erase = event.target.closest("[data-erase-meter]");
+  if (erase) eraseMeter(erase.dataset.eraseMeter);
 });
 
 async function setPermission(meterId, field, value, input) {
   try {
     await API.request(`/api/admin/meters/${encodeURIComponent(meterId)}/permissions`, { method: "PUT", body: { [field]: value } });
-    toast(field === "userRelayAllowed" ? (value ? "User can now control the relay" : "Relay locked for the user") : (value ? "User can now configure this meter" : "User configuration locked"));
+    toast(value ? "User can now configure this meter" : "User configuration locked");
   } catch (e) {
     input.checked = !value;
     toast(e.message);
@@ -140,6 +146,15 @@ async function renameMeter(meterId) {
     await API.request(`/api/admin/meters/${encodeURIComponent(meterId)}/name`, { method: "PUT", body: { meterName: name } });
     toast("Meter renamed");
     await loadMeters();
+  } catch (e) { toast(e.message); }
+}
+
+async function eraseMeter(meterId) {
+  const typed = prompt(`PERMANENT. This erases every reading (including held ones), the online history and Wi-Fi jobs of ${meterId}, and resets its name, assignment, subscription and settings. The meter and its device token stay. It cannot be undone.\n\nType the meter ID to confirm:`);
+  if (typed === null) return;
+  try {
+    toast((await API.request(`/api/admin/meters/${encodeURIComponent(meterId)}/erase`, { method: "POST", body: { confirm: typed } })).message);
+    await Promise.all([loadMeters(), loadOverview()]);
   } catch (e) { toast(e.message); }
 }
 
@@ -176,12 +191,15 @@ $("copyDeviceToken").addEventListener("click", async () => {
   }
 });
 
-async function setCommand(id, command) {
+async function setDataEnabled(meterId, value, input) {
   try {
-    await API.request(`/api/admin/meters/${encodeURIComponent(id)}/command`, { method: "PUT", body: { command } });
-    toast(`Relay ${command} saved; the ESP32 applies it within seconds.`);
-    await loadMeters();
-  } catch (e) { toast(e.message); }
+    const r = await API.request(`/api/admin/meters/${encodeURIComponent(meterId)}/data-enabled`, { method: "PUT", body: { dataEnabled: value } });
+    toast(r.message);
+    await loadOverview();
+  } catch (e) {
+    input.checked = !value;
+    toast(e.message);
+  }
 }
 
 async function setFreq(id, value) {
@@ -463,6 +481,10 @@ async function loadSmtpSettings() {
     $("smtpConfigured").className = `pill ${s.passwordConfigured ? "online" : "offline"}`;
     $("smtpStatus").textContent = `Source: ${s.source}. ${s.lastTestedAt ? `Last successful test: ${new Date(s.lastTestedAt).toLocaleString()}.` : "No successful test recorded."}`;
     $("smtpTestButton").disabled = !s.passwordConfigured;
+    const old = $("smtpTestTo").value;
+    $("smtpTestTo").innerHTML = `<option value="">To me (${esc(currentUser.email)})</option>` +
+      users.filter(u => u.active).map(u => `<option value="${esc(u.email)}">${esc(u.name)} — ${esc(u.email)}</option>`).join("");
+    $("smtpTestTo").value = old;
   } catch (e) {
     $("smtpStatus").textContent = e.message;
     $("smtpConfigured").textContent = "SETUP REQUIRED";
@@ -493,7 +515,7 @@ $("smtpTestButton").addEventListener("click", async () => {
   button.disabled = true;
   $("smtpMessage").textContent = "Sending a test email…";
   try {
-    const r = await API.request("/api/admin/smtp/test", { method: "POST" });
+    const r = await API.request("/api/admin/smtp/test", { method: "POST", body: { to: $("smtpTestTo").value } });
     $("smtpMessage").textContent = `${r.message} Verified at ${new Date(r.lastTestedAt).toLocaleString()}.`;
     toast("SMTP test email sent");
     await loadSmtpSettings();
@@ -506,6 +528,7 @@ async function loadSecurity() {
     const s = await API.request("/api/admin/security");
     $("otpForUsers").checked = s.otpForUsers;
     $("otpForAdmins").checked = s.otpForAdmins;
+    $("alertAdminCopy").checked = s.alertAdminCopy;
     $("otpTtl").value = s.otpTtlMinutes;
   } catch (e) { $("securityMsg").textContent = e.message; }
 }
@@ -514,7 +537,7 @@ $("securityForm").addEventListener("submit", async event => {
   event.preventDefault();
   try {
     const r = await API.request("/api/admin/security", { method: "PUT", body: {
-      otpForUsers: $("otpForUsers").checked, otpForAdmins: $("otpForAdmins").checked, otpTtlMinutes: Number($("otpTtl").value)
+      otpForUsers: $("otpForUsers").checked, otpForAdmins: $("otpForAdmins").checked, alertAdminCopy: $("alertAdminCopy").checked, otpTtlMinutes: Number($("otpTtl").value)
     } });
     $("securityMsg").textContent = r.message;
     toast(r.message);
@@ -538,10 +561,229 @@ async function loadOtps() {
 /* ---------- activity ---------- */
 async function loadActivity() {
   try {
-    const rows = await API.request("/api/admin/activity");
+    const rows = await API.request(`/api/admin/activity?type=${encodeURIComponent($("activityType").value)}`);
+    const tone = action => action === "login" || action === "email-sent" ? "online" : action === "login-failed" || action === "email-failed" ? "offline" : action === "logout" ? "blue" : "";
     $("activityTable").innerHTML = rows.map(r => `<tr>
       <td data-label="Time">${new Date(r.createdAt).toLocaleString()}</td><td data-label="Who">${esc(r.actorName)}${r.role ? ` <span class="pill off">${esc(r.role)}</span>` : ""}</td>
-      <td data-label="Action"><b>${esc(r.action)}</b></td><td data-label="Target">${esc(r.target)}</td><td data-label="Detail" class="wrap">${esc(r.detail)}</td></tr>`).join("")
+      <td data-label="Action">${tone(r.action) ? `<span class="pill ${tone(r.action)}">${esc(r.action.toUpperCase())}</span>` : `<b>${esc(r.action)}</b>`}</td><td data-label="Target">${esc(r.target)}</td><td data-label="Detail" class="wrap">${esc(r.detail)}</td></tr>`).join("")
       || `<tr><td colspan="5" class="empty">No activity recorded yet.</td></tr>`;
   } catch (e) { toast(e.message); }
 }
+$("activityType").addEventListener("change", loadActivity);
+
+/* ---------- online / offline history ---------- */
+function todayIst() { return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }); }
+$("presDate").value = todayIst();
+$("presMeter").addEventListener("change", loadPresence);
+$("presDate").addEventListener("change", loadPresence);
+
+async function loadPresence() {
+  const meterId = $("presMeter").value;
+  if (!meterId) { $("presList").innerHTML = `<tr><td colspan="4" class="empty">Register a meter first.</td></tr>`; return; }
+  try {
+    renderPresence(await API.request(`/api/meters/${encodeURIComponent(meterId)}/presence?date=${encodeURIComponent($("presDate").value || todayIst())}`), "presBar", "presSummary", "presList");
+  } catch (e) { toast(e.message); }
+}
+
+/* ---------- readings clean-up ---------- */
+$("readMeter").addEventListener("change", loadReadings);
+$("readHours").addEventListener("change", loadReadings);
+$("readSuspect").addEventListener("change", loadReadings);
+$("readAll").addEventListener("change", () => {
+  document.querySelectorAll("#readTable input[type=checkbox]").forEach(box => { box.checked = $("readAll").checked; });
+});
+
+async function loadReadings() {
+  const meterId = $("readMeter").value;
+  if (!meterId) { $("readTable").innerHTML = `<tr><td colspan="8" class="empty">Register a meter first.</td></tr>`; return; }
+  try {
+    const data = await API.request(`/api/admin/meters/${encodeURIComponent(meterId)}/readings?hours=${$("readHours").value}&suspect=${$("readSuspect").value}`);
+    $("readAll").checked = false;
+    $("readSummary").textContent = `${data.rows.length} shown · ${data.suspectCount} suspicious in this period · ${data.heldCount} held (received while data collection was off)`;
+    $("readDeleteSuspect").disabled = !data.suspectCount;
+    const bad = (value, min, max) => value != null && !(value >= min && value <= max);
+    $("readTable").innerHTML = data.rows.map(r => {
+      const flagged = bad(r.voltage, 0, 300) || bad(r.current, 0, 100) || bad(r.power, 0, 25000) || bad(r.energy, 0, 100000) || bad(r.frequency, 40, 70) || bad(r.powerFactor, 0, 1);
+      return `<tr class="${flagged ? "suspect-row" : ""}"><td class="check-col"><input type="checkbox" data-reading="${esc(r._id)}" aria-label="Select reading"></td>
+        <td data-label="Time">${new Date(r.createdAt).toLocaleString()}${flagged ? ' <span class="pill warn">SUSPECT</span>' : ""}${r.status === 0 ? ' <span class="pill off">HELD · status 0</span>' : ""}</td>
+        <td data-label="Voltage">${display(r.voltage, " V", 1)}</td><td data-label="Current">${display(r.current, " A", 3)}</td><td data-label="Power">${display(r.power, " W", 1)}</td>
+        <td data-label="Energy">${display(r.energy, " kWh", 4)}</td><td data-label="Freq">${display(r.frequency, " Hz", 1)}</td><td data-label="PF">${display(r.powerFactor, "", 2)}</td></tr>`;
+    }).join("") || `<tr><td colspan="8" class="empty">No readings match.</td></tr>`;
+  } catch (e) { toast(e.message); }
+}
+
+async function deleteReadings(body, question) {
+  const meterId = $("readMeter").value;
+  if (!meterId || !confirm(question)) return;
+  try {
+    const r = await API.request(`/api/admin/meters/${encodeURIComponent(meterId)}/readings/delete`, { method: "POST", body });
+    toast(r.message);
+    await Promise.all([loadReadings(), loadOverview()]);
+  } catch (e) { toast(e.message); }
+}
+
+$("readDeleteSelected").addEventListener("click", () => {
+  const ids = [...document.querySelectorAll("#readTable input[data-reading]:checked")].map(box => box.dataset.reading);
+  if (!ids.length) { toast("Tick the readings you want to delete."); return; }
+  deleteReadings({ ids }, `Permanently delete ${ids.length} reading(s)?`);
+});
+$("readDeleteSuspect").addEventListener("click", () =>
+  deleteReadings({ suspectHours: Number($("readHours").value) }, "Permanently delete ALL suspicious readings in the selected period?"));
+
+/* ---------- payments (approve / reject wallet top-ups) ---------- */
+async function loadPendingBadge() {
+  try {
+    const { pending } = await API.request("/api/admin/payments?status=pending");
+    $("pendingBadge").textContent = pending;
+    $("pendingBadge").classList.toggle("hidden", !pending);
+  } catch {}
+}
+
+$("payFilter").addEventListener("change", loadPayments);
+
+async function loadPayments() {
+  try {
+    const { payments, pending } = await API.request(`/api/admin/payments?status=${encodeURIComponent($("payFilter").value)}`);
+    $("pendingBadge").textContent = pending;
+    $("pendingBadge").classList.toggle("hidden", !pending);
+    $("payTable").innerHTML = payments.map(p => `<tr>
+      <td data-label="Submitted">${new Date(p.createdAt).toLocaleString()}</td>
+      <td data-label="User">${esc(p.user?.name || "(deleted)")}<div class="status-text" style="margin:0">${esc(p.user?.email || "")}</div></td>
+      <td data-label="Amount"><b>${inr(p.amount)}</b></td><td data-label="UTR">${esc(p.utr)}</td>
+      <td data-label="Status"><span class="pill ${p.status === "approved" ? "online" : p.status === "rejected" ? "offline" : "warn"}">${esc(p.status.toUpperCase())}</span>${p.receiptNo ? `<div class="status-text" style="margin:0">${esc(p.receiptNo)}</div>` : ""}${p.adminNote ? `<div class="status-text" style="margin:0">${esc(p.adminNote)}</div>` : ""}</td>
+      <td data-label="Actions"><div class="actions" style="justify-content:flex-end">
+        <button class="btn small secondary" data-shot="${esc(p._id)}">Screenshot</button>
+        ${p.status === "pending" ? `<button class="btn small success" data-approve="${esc(p._id)}" data-amount="${p.amount}">Approve</button><button class="btn small danger" data-reject="${esc(p._id)}">Reject</button>` : ""}
+      </div></td></tr>`).join("") || `<tr><td colspan="6" class="empty">No payments here.</td></tr>`;
+  } catch (e) { toast(e.message); }
+}
+
+$("payTable").addEventListener("click", async event => {
+  const shot = event.target.closest("[data-shot]");
+  const approve = event.target.closest("[data-approve]");
+  const reject = event.target.closest("[data-reject]");
+  try {
+    if (shot) {
+      $("shotImg").src = await API.blobUrl(`/api/payments/${encodeURIComponent(shot.dataset.shot)}/screenshot`);
+      $("shotDialog").showModal();
+    } else if (approve) {
+      const amount = prompt("Amount to credit (₹). Check it matches your bank / UPI app:", approve.dataset.amount);
+      if (amount === null) return;
+      approve.disabled = true;
+      toast((await API.request(`/api/admin/payments/${encodeURIComponent(approve.dataset.approve)}/approve`, { method: "POST", body: { amount: Number(amount) } })).message);
+      await loadPayments();
+    } else if (reject) {
+      const note = prompt("Reason for rejecting (shown to the user):");
+      if (!note) return;
+      toast((await API.request(`/api/admin/payments/${encodeURIComponent(reject.dataset.reject)}/reject`, { method: "POST", body: { note } })).message);
+      await loadPayments();
+    }
+  } catch (e) { toast(e.message); await loadPayments(); }
+});
+$("closeShot").addEventListener("click", () => $("shotDialog").close());
+
+/* ---------- wallets, plans, payment details ---------- */
+async function loadSubscriptions() {
+  try {
+    const [data, pay] = await Promise.all([API.request("/api/admin/subscriptions"), API.request("/api/admin/payment-settings")]);
+    $("payUpiId").value = pay.upiId;
+    $("payPayee").value = pay.payeeName;
+    $("payNote").value = pay.instructions;
+    $("payMin").value = pay.minRecharge;
+    $("qrPreview").classList.toggle("hidden", !pay.hasQr);
+    if (pay.hasQr) $("qrPreview").src = await API.blobUrl("/api/payment/qr");
+    $("planTable").innerHTML = data.plans.map(p => `<tr><td data-label="Plan"><b>${esc(p.name)}</b></td><td data-label="Price">${inr(p.price)}</td><td data-label="Days">${p.days}</td>
+      <td data-label="Status"><span class="pill ${p.active ? "online" : "off"}">${p.active ? "Active" : "Hidden"}</span></td>
+      <td data-label="Actions"><div class="actions" style="justify-content:flex-end"><button class="btn small secondary" data-plan-toggle="${esc(p._id)}" data-active="${p.active}">${p.active ? "Hide" : "Show"}</button><button class="btn small danger" data-plan-delete="${esc(p._id)}">Delete</button></div></td></tr>`).join("")
+      || `<tr><td colspan="5" class="empty">No plans yet. Add one so users can subscribe from their wallet.</td></tr>`;
+    $("walletTable").innerHTML = data.users.map(u => `<tr><td data-label="User"><b>${esc(u.name)}</b><div class="status-text" style="margin:0">${esc(u.email)}</div></td>
+      <td data-label="Balance"><b>${inr(u.balance)}</b></td>
+      <td data-label="Adjust wallet"><div class="actions"><button class="btn small success" data-wallet="credit" data-user="${esc(u._id)}" data-name="${esc(u.name)}">+ Add money</button><button class="btn small secondary" data-wallet="debit" data-user="${esc(u._id)}" data-name="${esc(u.name)}">− Deduct</button></div></td></tr>`).join("")
+      || `<tr><td colspan="3" class="empty">No users yet.</td></tr>`;
+    $("subTable").innerHTML = data.meters.map(m => {
+      const state = m.subscriptionEnd == null ? `<span class="pill off">NO EXPIRY</span>` : m.subscriptionExpired ? `<span class="pill offline">EXPIRED</span>` : `<span class="pill ${m.daysLeft <= 3 ? "warn" : "online"}">${m.daysLeft} DAY(S) LEFT</span>`;
+      return `<tr><td data-label="Meter"><b>${esc(m.meterName || m.meterId)}</b><div class="status-text" style="margin:0">${esc(m.meterId)}</div></td>
+        <td data-label="User">${m.user ? esc(m.user.name) : "unassigned"}</td>
+        <td data-label="Connection"><span class="pill ${m.online ? "online" : "offline"}">${m.online ? "ONLINE" : "OFFLINE"}</span> <span class="pill ${m.dataEnabled ? "on" : "off"}">DATA ${m.dataEnabled ? "ON" : "OFF"}</span></td>
+        <td data-label="Subscription">${state}${m.subscriptionEnd ? `<div class="status-text" style="margin:0">until ${new Date(m.subscriptionEnd).toLocaleDateString()}</div>` : ""}</td>
+        <td data-label="Actions"><div class="actions" style="justify-content:flex-end"><button class="btn small secondary" data-add-days="${esc(m.meterId)}">+ Days</button>${m.subscriptionEnd ? `<button class="btn small secondary" data-clear-sub="${esc(m.meterId)}">Remove limit</button>` : ""}</div></td></tr>`;
+    }).join("") || `<tr><td colspan="5" class="empty">No meters yet.</td></tr>`;
+  } catch (e) { toast(e.message); }
+}
+
+$("paySettingsForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  try {
+    const r = await API.request("/api/admin/payment-settings", { method: "PUT", body: { upiId: $("payUpiId").value, payeeName: $("payPayee").value, instructions: $("payNote").value, minRecharge: Number($("payMin").value) } });
+    $("paySettingsMsg").textContent = r.message;
+    toast(r.message);
+  } catch (e) { $("paySettingsMsg").textContent = e.message; toast(e.message); }
+});
+
+$("qrUpload").addEventListener("click", async () => {
+  const file = $("qrFile").files[0];
+  if (!file) { $("qrMsg").textContent = "Choose an image first."; return; }
+  try {
+    const r = await API.request("/api/admin/payment-qr", { method: "POST", body: { image: await fileToDataUrl(file) } });
+    $("qrMsg").textContent = r.message;
+    $("qrFile").value = "";
+    await loadSubscriptions();
+  } catch (e) { $("qrMsg").textContent = e.message; }
+});
+$("qrRemove").addEventListener("click", async () => {
+  try {
+    $("qrMsg").textContent = (await API.request("/api/admin/payment-qr", { method: "DELETE" })).message;
+    await loadSubscriptions();
+  } catch (e) { $("qrMsg").textContent = e.message; }
+});
+
+$("planForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  try {
+    toast((await API.request("/api/admin/plans", { method: "POST", body: { name: $("planName").value, price: Number($("planPrice").value), days: Number($("planDays").value) } })).message);
+    $("planForm").reset();
+    await loadSubscriptions();
+  } catch (e) { toast(e.message); }
+});
+
+$("planTable").addEventListener("click", async event => {
+  const toggle = event.target.closest("[data-plan-toggle]");
+  const del = event.target.closest("[data-plan-delete]");
+  try {
+    if (toggle) await API.request(`/api/admin/plans/${encodeURIComponent(toggle.dataset.planToggle)}`, { method: "PUT", body: { active: toggle.dataset.active !== "true" } });
+    else if (del) {
+      if (!confirm("Delete this plan? Meters using it for auto-renew will stop auto-renewing.")) return;
+      await API.request(`/api/admin/plans/${encodeURIComponent(del.dataset.planDelete)}`, { method: "DELETE" });
+    } else return;
+    await loadSubscriptions();
+  } catch (e) { toast(e.message); }
+});
+
+$("walletTable").addEventListener("click", async event => {
+  const b = event.target.closest("[data-wallet]");
+  if (!b) return;
+  const amount = prompt(`${b.dataset.wallet === "credit" ? "Add to" : "Deduct from"} ${b.dataset.name}'s wallet (₹):`);
+  if (!amount) return;
+  const note = prompt("Note (required, kept in the wallet history):");
+  if (!note) return;
+  try {
+    toast((await API.request(`/api/admin/users/${encodeURIComponent(b.dataset.user)}/wallet`, { method: "POST", body: { type: b.dataset.wallet, amount: Number(amount), note } })).message);
+    await loadSubscriptions();
+  } catch (e) { toast(e.message); }
+});
+
+$("subTable").addEventListener("click", async event => {
+  const add = event.target.closest("[data-add-days]");
+  const clear = event.target.closest("[data-clear-sub]");
+  try {
+    if (add) {
+      const days = prompt("Days to add to this meter's subscription:", "30");
+      if (!days) return;
+      toast((await API.request(`/api/admin/meters/${encodeURIComponent(add.dataset.addDays)}/subscription`, { method: "PUT", body: { days: Number(days) } })).message);
+    } else if (clear) {
+      if (!confirm("Remove the end date? This meter will never expire automatically.")) return;
+      toast((await API.request(`/api/admin/meters/${encodeURIComponent(clear.dataset.clearSub)}/subscription`, { method: "PUT", body: { clear: true } })).message);
+    } else return;
+    await Promise.all([loadSubscriptions(), loadMeters()]);
+  } catch (e) { toast(e.message); }
+});

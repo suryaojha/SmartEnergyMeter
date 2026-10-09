@@ -228,3 +228,14 @@ dialog::backdrop{background:rgba(8,13,26,.62)}
 @media(max-width:380px){.cards{grid-template-columns:1fr}.billing-breakdown{grid-template-columns:1fr}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 @media print{.topbar,.sidebar,.user-nav,.toast,.btn{display:none!important}}
+
+/* Online / offline day timeline */
+.timeline{position:relative;height:26px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);overflow:hidden}
+.timeline .seg{position:absolute;top:0;bottom:0;display:block}
+.timeline .seg.online{background:var(--ok)}
+.timeline .seg.offline{background:var(--bad)}
+.timeline .seg.unknown{background:transparent}
+.timeline-scale{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:4px}
+.filter-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.check-col{width:34px}
+.suspect-row td{background:var(--warn-soft)}
