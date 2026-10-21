@@ -1,6 +1,14 @@
 const msg = $("msg");
 let pendingEmail = "";
 if (new URLSearchParams(location.search).get("passwordReset") === "success") msg.textContent = "Password updated. Sign in with your new password.";
+if (new URLSearchParams(location.search).get("registered") === "success") msg.textContent = "Account created. Sign in with your new password.";
+if (new URLSearchParams(location.search).get("adminSetup") === "success") msg.textContent = "Administrator created. Sign in with your new password.";
+
+API.request("/api/auth/setup-status")
+  .then(status => {
+    if (status.adminSetupRequired) $("adminSetupLink").classList.remove("hidden");
+  })
+  .catch(error => console.error("Could not check administrator setup:", error));
 
 function finish(result) {
   localStorage.setItem("token", result.token);

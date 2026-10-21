@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#0f172a">
+  <title>Administrator setup | Smart Energy Meter</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body class="login-page">
+  <main class="login-box">
+    <div class="logo">⚡</div>
+    <form id="setupForm" class="hidden">
+      <h1>First-time administrator setup</h1>
+      <p class="muted">This page is available only until the first administrator is created.</p>
+      <div class="field"><label for="name">Name</label><input id="name" required maxlength="100" autocomplete="name"></div>
+      <div class="field"><label for="email">Administrator email</label><input id="email" type="email" required maxlength="254" autocomplete="email"></div>
+      <div class="field"><label for="password">Password</label><input id="password" type="password" required minlength="12" autocomplete="new-password"><small class="muted">Use at least 12 characters.</small></div>
+      <button id="setupBtn" class="btn" type="submit">Create administrator</button>
+    </form>
+    <div id="unavailable" class="hidden">
+      <h1>Setup unavailable</h1>
+      <p class="muted">Administrator setup has already been completed. Sign in with the existing administrator account.</p>
+      <p style="text-align:center;margin:16px 0 0"><a class="link" href="/login.html">Go to sign in</a></p>
+    </div>
+    <p id="msg" class="status-text" role="status" aria-live="polite" style="text-align:center"></p>
+    <p style="text-align:center;margin:16px 0 0"><a class="link" href="/login.html">Back to sign in</a></p>
+  </main>
+  <script src="/js/common.js"></script>
+  <script src="/js/setup-admin.js"></script>
+</body>
+</html>

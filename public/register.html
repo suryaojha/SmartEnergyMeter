@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#0f172a">
+  <title>Create account | Smart Energy Meter</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body class="login-page">
+  <main class="login-box">
+    <div class="logo">⚡</div>
+    <form id="registerForm">
+      <h1>Create account</h1>
+      <p class="muted">Register to access your energy dashboard.</p>
+      <div class="field"><label for="name">Name</label><input id="name" required maxlength="100" autocomplete="name"></div>
+      <div class="field"><label for="email">Email</label><input id="email" type="email" required maxlength="254" autocomplete="email" placeholder="you@example.com"></div>
+      <div class="field"><label for="password">Password</label><input id="password" type="password" required minlength="8" autocomplete="new-password"><small class="muted">At least 8 characters.</small></div>
+      <button id="registerBtn" class="btn" type="submit">Create account</button>
+      <p style="text-align:center;margin:16px 0 0"><a class="link" href="/login.html">Already registered? Sign in</a></p>
+    </form>
+    <p id="msg" class="status-text" role="status" aria-live="polite" style="text-align:center"></p>
+  </main>
+  <script src="/js/common.js"></script>
+  <script src="/js/register.js"></script>
+</body>
+</html>

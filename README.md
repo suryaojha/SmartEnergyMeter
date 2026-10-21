@@ -5,9 +5,9 @@ Node.js, MongoDB, and ESP32/PZEM energy monitoring with admin-managed meters, us
 ## Setup
 
 1. Install Node.js and MongoDB.
-2. Copy `.env.example` to `.env` and set `MONGO_URI`, a private `JWT_SECRET`, `ADMIN_EMAIL`, an `ADMIN_PASSWORD` of at least 12 characters, a private `SMTP_CONFIG_KEY` of at least 32 characters, and a private `WIFI_CONFIG_KEY` of at least 32 characters.
-3. Run `npm install`, then `npm run seed-admin`, then `npm start`.
-4. Sign in as the configured administrator. Open **Mail delivery** to enter SMTP host, port, username, and app password, then send a test message. The configured SMTP account is used as the sender; reset codes go to each user's registered email address. Register meters and configure tariff slabs, billing charges, targets, and alert limits before expecting cost estimates.
+2. Copy `.env.example` to `.env` and set `MONGODB_URI` (or the older `MONGO_URI`), a private `JWT_SECRET`, a private `SMTP_CONFIG_KEY` of at least 32 characters, and a private `WIFI_CONFIG_KEY` of at least 32 characters. `MONGODB_DB_NAME` defaults to `energyMeterDB`.
+3. Run `npm install`, then `npm start`. On a new database, open `/setup-admin.html` and create the first administrator. Existing deployments can continue using `npm run seed-admin` with `ADMIN_EMAIL` and an `ADMIN_PASSWORD` of at least 12 characters.
+4. Sign in as the administrator. Open **Mail delivery** to enter SMTP host, port, username, and app password, then send a test message. The configured SMTP account is used as the sender; reset codes go to each user's registered email address. Register meters and configure tariff slabs, billing charges, targets, and alert limits before expecting cost estimates. Users can create their own standard account from **Create account** on the login page.
 5. Configure the ESP32 in its Wi-Fi setup portal with the server URL and the exact meter ID registered in the admin dashboard.
 
 Meters are not seeded, and tariffs are not populated with sample rates. An estimate remains unavailable until the administrator configures a tariff and the meter provides enough real energy samples to calculate usage.
@@ -15,6 +15,12 @@ Meters are not seeded, and tariffs are not populated with sample rates. An estim
 ## Password-reset email
 
 SMTP settings saved from the admin panel are encrypted with AES-256-GCM and stored in MongoDB. `SMTP_CONFIG_KEY` must remain private, stable, and at least 32 characters; changing or losing it prevents decryption of saved SMTP passwords. Generate a different random key for each deployment. The SMTP environment variables are optional fallbacks for deployments that do not use database-managed settings. For Gmail, use an app password (which requires 2-Step Verification), not the account password. The SMTP test sends a message to the signed-in administrator's email address. Password-reset requests generate a random six-digit code, store only its hash and expiry in the user's MongoDB record, and send the code to the user's registered email; the code is validated before changing the password and invalidated after successful use. Use HTTPS in production, and rotate any SMTP credential that has been shared outside the admin panel.
+
+## Deploy to Render
+
+Create a Render Blueprint from this repository and select `render.yaml`. Enter the Atlas connection string as the `MONGODB_URI` secret when prompted; make sure the Atlas database user has access from Render (Atlas IP access list may require `0.0.0.0/0` for Render's changing outbound IPs). Use a dedicated, least-privilege database user, a strong password, and a URI-encoded password if it contains reserved URL characters. The blueprint generates `JWT_SECRET`, `WIFI_CONFIG_KEY`, and `SMTP_CONFIG_KEY`; retain these values securely across redeploys because changing them invalidates sessions or prevents decrypting stored settings. Once the service is healthy, open `/setup-admin.html` once to create the administrator, then sign in at `/login.html`.
+
+The free Render web service has an ephemeral filesystem and can sleep while idle. Uploaded payment images are stored on that filesystem, so they may disappear after a restart or redeploy; use persistent/object storage if those images must survive. Set SMTP environment variables or configure mail delivery in the admin dashboard if login OTP, password reset, and email reports are needed.
 
 ## Implemented
 

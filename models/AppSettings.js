@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 
 const appSettingsSchema = new mongoose.Schema({
   key: { type: String, default: "default", unique: true },
+  adminBootstrapClaimed: { type: Boolean, default: false },
   otpForUsers: { type: Boolean, default: false },
   otpForAdmins: { type: Boolean, default: false },
   otpTtlMinutes: { type: Number, default: 10, min: 2, max: 30 },

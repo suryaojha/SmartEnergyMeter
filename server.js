@@ -3,6 +3,7 @@ require("dotenv").config();
 const express = require("express");
 const path = require("path");
 const crypto = require("crypto");
+const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
@@ -770,6 +771,84 @@ app.post("/api/auth/logout", auth, async (req, res) => {
 
 app.get("/api/auth/me", auth, (req, res) => {
   res.json({ user: { id: req.user._id, name: req.user.name, email: req.user.email, role: req.user.role } });
+});
+
+app.get("/api/auth/setup-status", async (req, res) => {
+  try {
+    const [adminExists, setupClaimed] = await Promise.all([
+      User.exists({ role: "Admin" }),
+      AppSettings.exists({ key: "admin-bootstrap", adminBootstrapClaimed: true })
+    ]);
+    res.json({ adminSetupRequired: !adminExists && !setupClaimed });
+  } catch (error) {
+    console.error("Admin setup status failed:", error);
+    res.status(500).json({ message: "Could not check administrator setup status" });
+  }
+});
+
+app.post("/api/auth/setup-admin", async (req, res) => {
+  const name = String(req.body.name || "").trim();
+  const email = String(req.body.email || "").toLowerCase().trim();
+  const password = String(req.body.password || "");
+  if (!name || name.length > 100 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || password.length < 12) {
+    return res.status(400).json({ message: "Enter a name, valid email, and password of at least 12 characters." });
+  }
+
+  const session = await mongoose.startSession();
+  let user;
+  try {
+    await session.withTransaction(async () => {
+      if (await User.exists({ role: "Admin" }).session(session)) {
+        throw Object.assign(new Error("An administrator is already set up."), { status: 409 });
+      }
+      const claim = await AppSettings.findOneAndUpdate(
+        { key: "admin-bootstrap", adminBootstrapClaimed: { $ne: true } },
+        { $set: { adminBootstrapClaimed: true } },
+        { new: true, upsert: true, setDefaultsOnInsert: true, session }
+      );
+      if (!claim) throw Object.assign(new Error("Administrator setup has already been claimed."), { status: 409 });
+      [user] = await User.create([{
+        name,
+        email,
+        password: await bcrypt.hash(password, 12),
+        role: "Admin"
+      }], { session });
+    });
+    res.status(201).json({
+      message: "Administrator account created. You can now sign in.",
+      user: { id: user._id, name: user.name, email: user.email, role: user.role }
+    });
+  } catch (error) {
+    if (error.status || error.code === 11000) {
+      return res.status(409).json({ message: error.status ? error.message : "That email is already registered or setup has already been claimed." });
+    }
+    console.error("Administrator setup failed:", error);
+    res.status(500).json({ message: "Could not create the administrator account" });
+  } finally {
+    await session.endSession();
+  }
+});
+
+app.post("/api/auth/signup", async (req, res) => {
+  const name = String(req.body.name || "").trim();
+  const email = String(req.body.email || "").toLowerCase().trim();
+  const password = String(req.body.password || "");
+  if (!name || name.length > 100 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || password.length < 8) {
+    return res.status(400).json({ message: "Enter a name, valid email, and password of at least 8 characters." });
+  }
+  try {
+    const user = await User.create({
+      name,
+      email,
+      password: await bcrypt.hash(password, 12),
+      role: "User"
+    });
+    res.status(201).json({ message: "Account created. You can now sign in.", user: { id: user._id, name: user.name, email: user.email } });
+  } catch (error) {
+    if (error.code === 11000) return res.status(409).json({ message: "An account with that email already exists." });
+    console.error("User registration failed:", error);
+    res.status(500).json({ message: "Could not create the account" });
+  }
 });
 
 app.post("/api/auth/register", auth, adminOnly, async (req, res) => {
@@ -2539,6 +2618,5 @@ connectDB().then(async () => {
   console.error("MongoDB connection failed:", err);
   process.exit(1);
 });
-
 
 
