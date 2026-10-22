@@ -27,6 +27,7 @@
       <button class="navbtn" data-tab="wifi"><span class="ico">📶</span>ESP32 Wi-Fi</button>
       <button class="navbtn" data-tab="payments"><span class="ico">💳</span>Payments <span id="pendingBadge" class="pill warn hidden">0</span></button>
       <button class="navbtn" data-tab="subscriptions"><span class="ico">👛</span>Wallets &amp; plans</button>
+      <button class="navbtn" data-tab="msebReadings"><span class="ico">🔢</span>MSEB readings <span id="readingPendingBadge" class="pill warn hidden">0</span></button>
       <button class="navbtn" data-tab="readings"><span class="ico">🧹</span>Readings clean-up</button>
       <button class="navbtn" data-tab="users"><span class="ico">👥</span>Users</button>
       <div class="nav-label">Configure</div>
@@ -133,6 +134,15 @@
         <div class="page-head"><div><h1 class="page-title">Payments</h1><p class="muted">Users pay by UPI and upload a screenshot. Check it against your bank/UPI app, then approve to credit the wallet and e-mail a receipt.</p></div>
           <div class="filter-row"><select id="payFilter" aria-label="Filter payments"><option value="pending">Waiting for approval</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="">All</option></select><button class="btn secondary" onclick="loadPayments()">Refresh</button></div></div>
         <div class="panel"><div class="table-wrap"><table class="table stack"><thead><tr><th>Submitted</th><th>User</th><th>Amount</th><th>UTR</th><th>Status</th><th>Actions</th></tr></thead><tbody id="payTable"></tbody></table></div></div>
+      </section>
+
+      <section id="msebReadings" class="section">
+        <div class="page-head"><div><h1 class="page-title">MSEB readings</h1><p class="muted">Reading on each old MSEB meter, captured before the ESP32 went online, plus any user-submitted corrections waiting for your approval.</p></div></div>
+        <div class="panel"><div class="table-wrap"><table class="table stack"><thead><tr><th>Meter</th><th>User</th><th>Reading</th><th>Submitted</th><th>Photo</th></tr></thead><tbody id="msebTable"></tbody></table></div></div>
+
+        <div class="page-head" style="margin-top:20px"><div><h2 class="section-title" style="margin:0">Change requests</h2></div>
+          <div class="filter-row"><select id="readingReqFilter" aria-label="Filter requests"><option value="pending">Waiting for approval</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="">All</option></select><button class="btn secondary" onclick="loadReadingRequests()">Refresh</button></div></div>
+        <div class="panel"><div class="table-wrap"><table class="table stack"><thead><tr><th>Submitted</th><th>Meter</th><th>User</th><th>Requested reading</th><th>Status</th><th>Actions</th></tr></thead><tbody id="readingReqTable"></tbody></table></div></div>
       </section>
 
       <section id="subscriptions" class="section">

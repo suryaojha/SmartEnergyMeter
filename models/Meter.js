@@ -22,6 +22,10 @@ const meterSchema = new mongoose.Schema({
   firmware: { type: String, default: "" },
   rssi: { type: Number, default: null },
   updateFrequency: { type: Number, default: 5, min: 1, max: 3600 },
+  // Reading on the old MSEB meter at commissioning, captured before the ESP32 goes online.
+  msebInitialReading: { type: Number, default: null },
+  msebInitialReadingPhoto: { type: String, default: null },
+  msebInitialReadingAt: { type: Date, default: null },
   lastSeen: { type: Date, default: null },        // last stored reading
   lastHeartbeat: { type: Date, default: null },   // last time the ESP32 contacted the server at all
   onlineSince: { type: Date, default: null },

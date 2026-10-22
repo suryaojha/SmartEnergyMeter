@@ -10,6 +10,7 @@ function openTab(tab) {
   if (tab === "wifi") loadWifiStatus();
   if (tab === "presence") loadPresence();
   if (tab === "payments") loadPayments();
+  if (tab === "msebReadings") { loadMsebReadings(); loadReadingRequests(); }
   if (tab === "subscriptions") loadSubscriptions();
   if (tab === "readings") loadReadings();
   if (tab === "smtp") loadSmtpSettings();
@@ -31,6 +32,8 @@ document.querySelectorAll(".navbtn").forEach(button => { button.onclick = () => 
   setInterval(() => { if (!document.hidden) loadOverview(); }, 5000);
   loadPendingBadge();
   setInterval(() => { if (!document.hidden) loadPendingBadge(); }, 20000);
+  loadReadingPendingBadge();
+  setInterval(() => { if (!document.hidden) loadReadingPendingBadge(); }, 20000);
   setInterval(() => { if (!document.hidden && $("wifi").classList.contains("active")) loadWifiStatus(); }, 5000);
 })();
 
@@ -681,6 +684,79 @@ $("payTable").addEventListener("click", async event => {
   } catch (e) { toast(e.message); await loadPayments(); }
 });
 $("closeShot").addEventListener("click", () => $("shotDialog").close());
+
+/* ---------- MSEB readings (captured before the ESP32 goes online) ---------- */
+async function loadReadingPendingBadge() {
+  try {
+    const { pending } = await API.request("/api/admin/reading-requests?status=pending");
+    $("readingPendingBadge").textContent = pending;
+    $("readingPendingBadge").classList.toggle("hidden", !pending);
+  } catch {}
+}
+
+async function loadMsebReadings() {
+  try {
+    const rows = await API.request("/api/admin/mseb-readings");
+    $("msebTable").innerHTML = rows.map(m => `<tr>
+      <td data-label="Meter"><b>${esc(m.meterName || m.meterId)}</b><div class="status-text" style="margin:0">${esc(m.meterId)}</div></td>
+      <td data-label="User">${m.user ? esc(m.user.name) : "unassigned"}</td>
+      <td data-label="Reading">${m.reading == null ? `<span class="status-text">not submitted</span>` : `<b>${m.reading} kWh</b>`}</td>
+      <td data-label="Submitted">${m.submittedAt ? new Date(m.submittedAt).toLocaleString() : "--"}</td>
+      <td data-label="Photo">${m.photoFile ? `<button class="btn small secondary" data-mseb-shot="${esc(m.meterId)}">View</button>` : "--"}</td>
+      </tr>`).join("") || `<tr><td colspan="5" class="empty">No meters yet.</td></tr>`;
+  } catch (e) { toast(e.message); }
+}
+
+$("msebTable").addEventListener("click", async event => {
+  const shot = event.target.closest("[data-mseb-shot]");
+  if (!shot) return;
+  try {
+    $("shotImg").src = await API.blobUrl(`/api/admin/mseb-readings/${encodeURIComponent(shot.dataset.msebShot)}/photo`);
+    $("shotDialog").showModal();
+  } catch (e) { toast(e.message); }
+});
+
+$("readingReqFilter").addEventListener("change", loadReadingRequests);
+
+async function loadReadingRequests() {
+  try {
+    const { requests, pending } = await API.request(`/api/admin/reading-requests?status=${encodeURIComponent($("readingReqFilter").value)}`);
+    $("readingPendingBadge").textContent = pending;
+    $("readingPendingBadge").classList.toggle("hidden", !pending);
+    $("readingReqTable").innerHTML = requests.map(r => `<tr>
+      <td data-label="Submitted">${new Date(r.createdAt).toLocaleString()}</td>
+      <td data-label="Meter">${esc(r.meterId)}</td>
+      <td data-label="User">${esc(r.user?.name || "(deleted)")}<div class="status-text" style="margin:0">${esc(r.user?.email || "")}</div></td>
+      <td data-label="Requested reading"><b>${r.reading} kWh</b></td>
+      <td data-label="Status"><span class="pill ${r.status === "approved" ? "online" : r.status === "rejected" ? "offline" : "warn"}">${esc(r.status.toUpperCase())}</span>${r.adminNote ? `<div class="status-text" style="margin:0">${esc(r.adminNote)}</div>` : ""}</td>
+      <td data-label="Actions"><div class="actions" style="justify-content:flex-end">
+        <button class="btn small secondary" data-req-shot="${esc(r._id)}">Photo</button>
+        ${r.status === "pending" ? `<button class="btn small success" data-req-approve="${esc(r._id)}">Approve</button><button class="btn small danger" data-req-reject="${esc(r._id)}">Reject</button>` : ""}
+      </div></td></tr>`).join("") || `<tr><td colspan="6" class="empty">No requests here.</td></tr>`;
+  } catch (e) { toast(e.message); }
+}
+
+$("readingReqTable").addEventListener("click", async event => {
+  const shot = event.target.closest("[data-req-shot]");
+  const approve = event.target.closest("[data-req-approve]");
+  const reject = event.target.closest("[data-req-reject]");
+  try {
+    if (shot) {
+      $("shotImg").src = await API.blobUrl(`/api/admin/reading-requests/${encodeURIComponent(shot.dataset.reqShot)}/photo`);
+      $("shotDialog").showModal();
+    } else if (approve) {
+      approve.disabled = true;
+      toast((await API.request(`/api/admin/reading-requests/${encodeURIComponent(approve.dataset.reqApprove)}/approve`, { method: "POST" })).message);
+      await loadReadingRequests();
+      await loadMsebReadings();
+    } else if (reject) {
+      const note = prompt("Reason for rejecting (shown to the user):");
+      if (!note) return;
+      toast((await API.request(`/api/admin/reading-requests/${encodeURIComponent(reject.dataset.reqReject)}/reject`, { method: "POST", body: { note } })).message);
+      await loadReadingRequests();
+    }
+  } catch (e) { toast(e.message); await loadReadingRequests(); }
+});
 
 /* ---------- wallets, plans, payment details ---------- */
 async function loadSubscriptions() {

@@ -24,6 +24,7 @@ const PresenceEvent = require("./models/PresenceEvent");
 const Plan = require("./models/Plan");
 const WalletTxn = require("./models/WalletTxn");
 const PaymentRequest = require("./models/PaymentRequest");
+const ReadingChangeRequest = require("./models/ReadingChangeRequest");
 const fs = require("fs");
 const { auth, adminOnly } = require("./middleware/auth");
 
@@ -34,9 +35,10 @@ if (!JWT_SECRET) throw new Error("JWT_SECRET must be configured in the environme
 
 // Image uploads (base64 in JSON) get a bigger body limit, but only on these authenticated routes (see uploadJson).
 const UPLOAD_ROUTES = new Set(["/api/user/payments", "/api/admin/payment-qr"]);
+const UPLOAD_ROUTE_PATTERNS = [/^\/api\/user\/meters\/[^/]+\/mseb-reading$/, /^\/api\/user\/meters\/[^/]+\/mseb-reading\/change-request$/];
 const uploadJson = express.json({ limit: "5mb" });
 const smallJson = express.json();
-app.use((req, res, next) => (UPLOAD_ROUTES.has(req.path) && req.method === "POST" ? next() : smallJson(req, res, next)));
+app.use((req, res, next) => ((UPLOAD_ROUTES.has(req.path) || UPLOAD_ROUTE_PATTERNS.some(p => p.test(req.path))) && req.method === "POST" ? next() : smallJson(req, res, next)));
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -1370,6 +1372,75 @@ app.put("/api/user/meters/:meterId/settings", auth, async (req, res) => {
   res.json({ message: "Meter settings saved. The ESP32 picks them up within seconds.", meter: publicMeter(saved) });
 });
 
+// --- existing MSEB meter reading (captured once, before the ESP32 goes online) ---
+function readingView(meter) {
+  return { reading: meter.msebInitialReading, photoFile: meter.msebInitialReadingPhoto, submittedAt: meter.msebInitialReadingAt };
+}
+
+function parseReading(value) {
+  const reading = Number(value);
+  return Number.isFinite(reading) && reading >= 0 && reading <= 999999 ? reading : null;
+}
+
+app.get("/api/user/meters/:meterId/mseb-reading", auth, async (req, res) => {
+  const meter = await ownMeter(req, res);
+  if (!meter) return;
+  const pending = await ReadingChangeRequest.findOne({ meterId: meter.meterId, userId: req.user._id, status: "pending" }).sort({ createdAt: -1 }).lean();
+  res.json({ ...readingView(meter), pending: pending ? { reading: pending.reading, createdAt: pending.createdAt } : null });
+});
+
+app.post("/api/user/meters/:meterId/mseb-reading", auth, uploadJson, async (req, res) => {
+  let file = "";
+  try {
+    const meter = await ownMeter(req, res);
+    if (!meter) return;
+    if (meter.msebInitialReading !== null) return res.status(409).json({ message: "A reading was already recorded for this meter. Submit a change request instead." });
+    const reading = parseReading(req.body.reading);
+    if (reading === null) return res.status(400).json({ message: "Enter the reading shown on your old MSEB meter (0 to 999999 kWh)." });
+    file = await saveImage(req.body.photo, crypto.randomBytes(12).toString("hex"));
+    await Meter.updateOne({ _id: meter._id }, { $set: { msebInitialReading: reading, msebInitialReadingPhoto: file, msebInitialReadingAt: new Date() } });
+    await logActivity(req.user, "mseb-reading-submitted", meter.meterId, `${reading} kWh`);
+    res.status(201).json({ message: "Reading saved.", ...readingView({ msebInitialReading: reading, msebInitialReadingPhoto: file, msebInitialReadingAt: new Date() }) });
+  } catch (error) {
+    await removeUpload(file);
+    if (error.status) return res.status(error.status).json({ message: error.message });
+    console.error("MSEB reading submit failed:", error);
+    res.status(500).json({ message: "Could not save the reading." });
+  }
+});
+
+app.post("/api/user/meters/:meterId/mseb-reading/change-request", auth, uploadJson, async (req, res) => {
+  let file = "";
+  try {
+    const meter = await ownMeter(req, res);
+    if (!meter) return;
+    if (meter.msebInitialReading === null) return res.status(400).json({ message: "Submit the initial reading first." });
+    const reading = parseReading(req.body.reading);
+    if (reading === null) return res.status(400).json({ message: "Enter a valid reading (0 to 999999 kWh)." });
+    if (await ReadingChangeRequest.countDocuments({ meterId: meter.meterId, status: "pending" }) >= 3) {
+      return res.status(429).json({ message: "You already have requests waiting for approval. Please wait for the administrator to review them." });
+    }
+    file = await saveImage(req.body.photo, crypto.randomBytes(12).toString("hex"));
+    const request = await ReadingChangeRequest.create({ meterId: meter.meterId, userId: req.user._id, reading, photoFile: file });
+    await logActivity(req.user, "mseb-reading-change-requested", meter.meterId, `${reading} kWh`);
+    res.status(201).json({ message: "Change request submitted. The administrator will review it.", id: request._id });
+    User.find({ role: "Admin", active: true }).select("name email").lean().then(admins => Promise.all(admins.map(admin =>
+      notifyUser(admin, "Meter reading change waiting for approval", [`${req.user.name} (${req.user.email}) requested a correction to the MSEB reading for ${meter.meterName || meter.meterId}: ${reading} kWh. Open Meter readings in the admin dashboard to review.`], "reading change pending")))).catch(() => {});
+  } catch (error) {
+    await removeUpload(file);
+    if (error.status) return res.status(error.status).json({ message: error.message });
+    console.error("Reading change request failed:", error);
+    res.status(500).json({ message: "Could not submit the change request." });
+  }
+});
+
+app.get("/api/user/meters/:meterId/mseb-reading/photo", auth, async (req, res) => {
+  const meter = await ownMeter(req, res);
+  if (!meter) return;
+  if (!meter.msebInitialReadingPhoto) return res.status(404).json({ message: "No photo uploaded" });
+  sendImage(res, meter.msebInitialReadingPhoto);
+});
+
 app.get("/api/user/meters/:meterId/wifi", auth, async (req, res) => {
   const meter = await ownMeter(req, res, "userConfigAllowed");
   if (meter) res.json(await wifiState(meter));
@@ -2204,6 +2275,74 @@ app.post("/api/admin/payments/:id/reject", auth, adminOnly, async (req, res) => 
   const user = await User.findById(payment.userId).select("name email").lean();
   if (user) notifyUser(user, "Payment not approved", [`Your payment of ${money2(payment.amountPaise)} (UTR ${payment.utr}) could not be approved.`, `Reason: ${note}`, "If you believe this is a mistake, submit the payment again with a clear screenshot or contact your administrator."], "payment rejected");
   res.json({ message: "Payment rejected and the user was notified." });
+});
+
+// --- admin: existing MSEB meter readings & change requests ---
+app.get("/api/admin/mseb-readings", auth, adminOnly, async (req, res) => {
+  const meters = await Meter.find().populate("userId", "name email").sort({ meterId: 1 }).lean();
+  res.json(meters.map(m => ({
+    meterId: m.meterId, meterName: m.meterName, user: m.userId ? { name: m.userId.name, email: m.userId.email } : null,
+    reading: m.msebInitialReading, photoFile: m.msebInitialReadingPhoto, submittedAt: m.msebInitialReadingAt
+  })));
+});
+
+app.get("/api/admin/mseb-readings/:meterId/photo", auth, adminOnly, async (req, res) => {
+  const meter = await Meter.findOne({ meterId: req.params.meterId.toUpperCase() }).lean();
+  if (!meter?.msebInitialReadingPhoto) return res.status(404).json({ message: "No photo uploaded" });
+  sendImage(res, meter.msebInitialReadingPhoto);
+});
+
+app.get("/api/admin/reading-requests", auth, adminOnly, async (req, res) => {
+  const filter = ["pending", "approved", "rejected"].includes(req.query.status) ? { status: req.query.status } : {};
+  const [rows, pending] = await Promise.all([
+    ReadingChangeRequest.find(filter).sort({ createdAt: -1 }).limit(200).populate("userId", "name email").lean(),
+    ReadingChangeRequest.countDocuments({ status: "pending" })
+  ]);
+  res.json({
+    pending,
+    requests: rows.map(r => ({
+      _id: r._id, meterId: r.meterId, reading: r.reading, status: r.status, adminNote: r.adminNote, reviewedBy: r.reviewedBy,
+      createdAt: r.createdAt, reviewedAt: r.reviewedAt, user: r.userId ? { name: r.userId.name, email: r.userId.email } : null
+    }))
+  });
+});
+
+app.get("/api/admin/reading-requests/:id/photo", auth, adminOnly, async (req, res) => {
+  if (!OBJECT_ID.test(req.params.id)) return res.status(404).json({ message: "Not found" });
+  const request = await ReadingChangeRequest.findById(req.params.id).lean();
+  if (!request) return res.status(404).json({ message: "Not found" });
+  sendImage(res, request.photoFile);
+});
+
+app.post("/api/admin/reading-requests/:id/approve", auth, adminOnly, async (req, res) => {
+  if (!OBJECT_ID.test(req.params.id)) return res.status(404).json({ message: "Request not found" });
+  // Claiming pending -> approved first makes a double click or two admins approving twice impossible.
+  const request = await ReadingChangeRequest.findOneAndUpdate(
+    { _id: req.params.id, status: "pending" },
+    { $set: { status: "approved", reviewedBy: req.user.email, reviewedAt: new Date(), adminNote: String(req.body.note || "").slice(0, 240) } },
+    { new: true }
+  );
+  if (!request) return res.status(409).json({ message: "This request was already reviewed." });
+  const meter = await Meter.findOneAndUpdate({ meterId: request.meterId },
+    { $set: { msebInitialReading: request.reading, msebInitialReadingPhoto: request.photoFile, msebInitialReadingAt: new Date() } }, { new: true });
+  if (meter?.msebInitialReadingPhoto && meter.msebInitialReadingPhoto !== request.photoFile) await removeUpload(meter.msebInitialReadingPhoto);
+  await logActivity(req.user, "mseb-reading-approved", request.meterId, `${request.reading} kWh`);
+  const user = await User.findById(request.userId).select("name email").lean();
+  if (user) notifyUser(user, "Meter reading change approved", [`Your requested reading of ${request.reading} kWh for ${request.meterId} was approved and is now on record.`], "reading change approved");
+  res.json({ message: "Approved. The meter's recorded reading was updated." });
+});
+
+app.post("/api/admin/reading-requests/:id/reject", auth, adminOnly, async (req, res) => {
+  if (!OBJECT_ID.test(req.params.id)) return res.status(404).json({ message: "Request not found" });
+  const note = String(req.body.note || "").trim().slice(0, 240);
+  if (!note) return res.status(400).json({ message: "Give the user a reason for rejecting this request." });
+  const request = await ReadingChangeRequest.findOneAndUpdate({ _id: req.params.id, status: "pending" },
+    { $set: { status: "rejected", adminNote: note, reviewedBy: req.user.email, reviewedAt: new Date() } }, { new: true });
+  if (!request) return res.status(409).json({ message: "This request was already reviewed or does not exist." });
+  await logActivity(req.user, "mseb-reading-rejected", request.meterId, note);
+  const user = await User.findById(request.userId).select("name email").lean();
+  if (user) notifyUser(user, "Meter reading change not approved", [`Your requested reading change for ${request.meterId} (${request.reading} kWh) could not be approved.`, `Reason: ${note}`, "If you believe this is a mistake, submit the request again with a clear photo or contact your administrator."], "reading change rejected");
+  res.json({ message: "Request rejected and the user was notified." });
 });
 
 app.get("/api/admin/subscriptions", auth, adminOnly, async (req, res) => {

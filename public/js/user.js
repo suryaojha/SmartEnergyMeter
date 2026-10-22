@@ -5,7 +5,7 @@ function openTab(tab) {
   document.querySelectorAll(".user-section").forEach(item => item.classList.toggle("active", item.id === tab));
   window.scrollTo({ top: 0 });
   if (tab === "analytics") loadConsumption();
-  if (tab === "meter") { loadAssignedConfig(); loadWifi(); }
+  if (tab === "meter") { loadAssignedConfig(); loadWifi(); loadMsebReading(); }
   if (tab === "presence") loadPresence();
   if (tab === "wallet") loadWallet();
   if (tab === "insights") loadAlertPrefs();
@@ -50,7 +50,7 @@ $("meterSelect").onchange = async () => {
   configFilledFor = null;
   renderLive(currentMeter);
   await loadConsumption();
-  if ($("meter").classList.contains("active")) { loadAssignedConfig(); loadWifi(); }
+  if ($("meter").classList.contains("active")) { loadAssignedConfig(); loadWifi(); loadMsebReading(); }
   if ($("presence").classList.contains("active")) loadPresence();
 };
 $("graphPeriod").onchange = loadConsumption;
@@ -165,6 +165,62 @@ $("wifiConnect").addEventListener("click", async () => {
     $("wifiMessage").textContent = r.message;
     await loadWifi();
   } catch (e) { $("wifiMessage").textContent = e.message; }
+});
+
+/* ---------- existing MSEB meter reading ---------- */
+let msebMode = "initial"; // "initial" | "change"
+
+async function loadMsebReading() {
+  if (!currentMeter) return;
+  try {
+    const r = await API.request(`/api/user/meters/${encodeURIComponent(currentMeter.meterId)}/mseb-reading`);
+    $("msebForm").reset();
+    $("msebMessage").textContent = "";
+    if (r.reading == null) {
+      msebMode = "initial";
+      $("msebSaved").classList.add("hidden");
+      $("msebForm").classList.remove("hidden");
+      $("msebCancel").classList.add("hidden");
+    } else {
+      $("msebSaved").classList.remove("hidden");
+      $("msebForm").classList.add("hidden");
+      $("msebReadingValue").textContent = `${r.reading} kWh`;
+      $("msebReadingDate").textContent = new Date(r.submittedAt).toLocaleString();
+      $("msebPhoto").src = await API.blobUrl(`/api/user/meters/${encodeURIComponent(currentMeter.meterId)}/mseb-reading/photo`);
+      $("msebPendingNotice").classList.toggle("hidden", !r.pending);
+      if (r.pending) $("msebPendingNotice").textContent = `Change request pending: ${r.pending.reading} kWh, submitted ${new Date(r.pending.createdAt).toLocaleString()}. Waiting for administrator approval.`;
+    }
+  } catch (e) { toast(e.message); }
+}
+
+$("msebRequestChangeBtn").addEventListener("click", () => {
+  msebMode = "change";
+  $("msebForm").classList.remove("hidden");
+  $("msebCancel").classList.remove("hidden");
+});
+
+$("msebCancel").addEventListener("click", () => {
+  $("msebForm").classList.add("hidden");
+  $("msebForm").reset();
+  $("msebMessage").textContent = "";
+});
+
+$("msebForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const button = $("msebSubmit"), message = $("msebMessage");
+  const file = $("msebPhotoInput").files[0];
+  if (!file) { message.textContent = "Attach a photo of the meter display."; return; }
+  button.disabled = true;
+  message.textContent = "Uploading…";
+  try {
+    const path = `/api/user/meters/${encodeURIComponent(currentMeter.meterId)}/mseb-reading${msebMode === "change" ? "/change-request" : ""}`;
+    const r = await API.request(path, { method: "POST", body: { reading: Number($("msebReading").value), photo: await fileToDataUrl(file) } });
+    message.textContent = r.message;
+    toast(r.message);
+    $("msebCancel").classList.add("hidden");
+    await loadMsebReading();
+  } catch (e) { message.textContent = e.message; toast(e.message); }
+  finally { button.disabled = false; }
 });
 
 /* ---------- what the admin configured ---------- */

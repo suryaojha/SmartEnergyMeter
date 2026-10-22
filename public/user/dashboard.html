@@ -164,6 +164,23 @@
         </form>
 
         <div class="panel">
+          <h2 class="section-title" style="margin-top:0">Existing MSEB meter reading</h2>
+          <p class="status-text" style="margin-top:0">Before this meter goes online, record the reading on your old MSEB meter so your usage can be tracked from the right starting point.</p>
+          <div id="msebSaved" class="hidden">
+            <dl class="kv"><dt>Recorded reading</dt><dd id="msebReadingValue">--</dd><dt>Submitted</dt><dd id="msebReadingDate">--</dd></dl>
+            <img id="msebPhoto" alt="Old MSEB meter photo" style="max-width:220px;border-radius:12px;border:1px solid var(--border);margin:8px 0;display:block">
+            <div id="msebPendingNotice" class="notice warn hidden" style="margin-top:8px"></div>
+            <button id="msebRequestChangeBtn" class="btn secondary" type="button">Request a change</button>
+          </div>
+          <form id="msebForm" class="hidden" style="display:grid;gap:12px;max-width:420px;margin-top:8px">
+            <div class="field"><label for="msebReading">Current reading on old meter (kWh)</label><input id="msebReading" type="number" min="0" max="999999" step="0.01" required></div>
+            <div class="field"><label for="msebPhotoInput">Photo of the meter display</label><input id="msebPhotoInput" type="file" accept="image/png,image/jpeg,image/webp" required></div>
+            <div class="actions"><button id="msebSubmit" class="btn" type="submit">Save reading</button><button id="msebCancel" class="btn secondary hidden" type="button">Cancel</button></div>
+            <p id="msebMessage" class="status-text" role="status" aria-live="polite"></p>
+          </form>
+        </div>
+
+        <div class="panel">
           <h2 class="section-title" style="margin-top:0">Wi-Fi for this meter</h2>
           <p id="wifiStatus" class="status-text" style="margin-top:0">--</p>
           <div class="form-row" style="margin-top:12px">
