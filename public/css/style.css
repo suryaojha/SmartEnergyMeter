@@ -178,13 +178,6 @@ dialog::backdrop{background:rgba(8,13,26,.62)}
 .hero h1{font-size:48px}
 .hero p{font-size:18px;color:var(--muted)}
 
-/* user app: bottom navigation on phones */
-.user-main{max-width:1200px;margin:0 auto;padding:20px 20px calc(var(--bottom-h) + 24px)}
-.user-nav{display:flex;gap:6px;margin-bottom:18px;background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:5px;overflow-x:auto}
-.user-navbtn{flex:1 0 auto;display:flex;align-items:center;justify-content:center;gap:8px;padding:10px 16px;border-radius:10px;color:var(--muted);font-weight:700;font-size:14px;white-space:nowrap}
-.user-navbtn .ico{font-size:17px}
-.user-navbtn.active{background:var(--primary-soft);color:var(--primary-ink)}
-
 @media(max-width:1000px){
   .cards{grid-template-columns:repeat(2,minmax(0,1fr))}
   .three{grid-template-columns:1fr 1fr}
@@ -214,12 +207,6 @@ dialog::backdrop{background:rgba(8,13,26,.62)}
   .toolbar>.field,.toolbar select{width:100%}
   .actions .btn{flex:1}
   .login-box{padding:24px}
-  .toast{bottom:calc(var(--bottom-h) + 12px)}
-  /* user nav becomes a fixed bottom tab bar */
-  .user-nav{position:fixed;left:0;right:0;bottom:0;z-index:40;margin:0;border-radius:16px 16px 0 0;border-width:1px 0 0;padding:6px 6px calc(6px + env(safe-area-inset-bottom));justify-content:space-around;gap:0;box-shadow:0 -6px 20px rgba(0,0,0,.12);overflow:visible}
-  .user-navbtn{flex:1;flex-direction:column;gap:2px;padding:6px 2px;font-size:11px;min-width:0}
-  .user-navbtn .ico{font-size:20px}
-  .user-main{padding:14px 13px calc(var(--bottom-h) + 30px)}
   table.stack thead{display:none}
   table.stack tr{display:block;border:1px solid var(--border);border-radius:12px;margin-bottom:10px;padding:6px 10px}
   table.stack td{display:flex;justify-content:space-between;gap:12px;border:0;padding:6px 0;white-space:normal;text-align:right}
@@ -227,7 +214,7 @@ dialog::backdrop{background:rgba(8,13,26,.62)}
 }
 @media(max-width:380px){.cards{grid-template-columns:1fr}.billing-breakdown{grid-template-columns:1fr}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
-@media print{.topbar,.sidebar,.user-nav,.toast,.btn{display:none!important}}
+@media print{.topbar,.sidebar,.toast,.btn,#whatsappFloat{display:none!important}}
 
 /* Online / offline day timeline */
 .timeline{position:relative;height:26px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);overflow:hidden}

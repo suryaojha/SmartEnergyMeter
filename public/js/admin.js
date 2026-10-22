@@ -11,6 +11,7 @@ function openTab(tab) {
   if (tab === "presence") loadPresence();
   if (tab === "payments") loadPayments();
   if (tab === "msebReadings") { loadMsebReadings(); loadReadingRequests(); loadMsebHistoryAdmin(); }
+  if (tab === "tickets") loadTicketsAdmin();
   if (tab === "subscriptions") loadSubscriptions();
   if (tab === "readings") loadReadings();
   if (tab === "smtp") loadSmtpSettings();
@@ -34,6 +35,8 @@ document.querySelectorAll(".navbtn").forEach(button => { button.onclick = () => 
   setInterval(() => { if (!document.hidden) loadPendingBadge(); }, 20000);
   loadReadingPendingBadge();
   setInterval(() => { if (!document.hidden) loadReadingPendingBadge(); }, 20000);
+  loadTicketPendingBadge();
+  setInterval(() => { if (!document.hidden) loadTicketPendingBadge(); }, 20000);
   setInterval(() => { if (!document.hidden && $("wifi").classList.contains("active")) loadWifiStatus(); }, 5000);
 })();
 
@@ -451,9 +454,9 @@ $("settingsForm").onsubmit = async event => {
 async function loadFeatures() {
   try {
     const f = await API.request("/api/admin/features");
-    $("featureNotifications").checked = f.notifications;
     $("featureBillPdf").checked = f.billPdf;
     $("featureSavingsTracker").checked = f.savingsTracker;
+    $("whatsappNumber").value = f.whatsappNumber || "";
   } catch (e) { toast(e.message); }
 }
 
@@ -461,7 +464,7 @@ $("featuresForm").onsubmit = async event => {
   event.preventDefault();
   try {
     const r = await API.request("/api/admin/features", { method: "PUT", body: {
-      notifications: $("featureNotifications").checked, billPdf: $("featureBillPdf").checked, savingsTracker: $("featureSavingsTracker").checked
+      billPdf: $("featureBillPdf").checked, savingsTracker: $("featureSavingsTracker").checked, whatsappNumber: $("whatsappNumber").value
     } });
     $("featuresMsg").textContent = r.message;
     toast(r.message);
@@ -829,6 +832,65 @@ $("msebHistoryAdminTable").addEventListener("click", async event => {
       await loadMsebHistoryAdmin();
     }
   } catch (e) { toast(e.message); await loadMsebHistoryAdmin(); }
+});
+
+/* ---------- support tickets ---------- */
+async function loadTicketPendingBadge() {
+  try {
+    const { open } = await API.request("/api/admin/tickets?status=open");
+    $("ticketPendingBadge").textContent = open;
+    $("ticketPendingBadge").classList.toggle("hidden", !open);
+  } catch {}
+}
+
+let ticketsCache = [];
+
+$("ticketFilter").addEventListener("change", loadTicketsAdmin);
+
+async function loadTicketsAdmin() {
+  try {
+    const { tickets, open } = await API.request(`/api/admin/tickets?status=${encodeURIComponent($("ticketFilter").value)}`);
+    ticketsCache = tickets;
+    $("ticketPendingBadge").textContent = open;
+    $("ticketPendingBadge").classList.toggle("hidden", !open);
+    $("ticketAdminTable").innerHTML = tickets.map(t => `<tr>
+      <td data-label="Ticket"><b>${esc(t.ticketNo)}</b></td>
+      <td data-label="Submitted">${new Date(t.createdAt).toLocaleString()}</td>
+      <td data-label="User">${esc(t.user?.name || "(deleted)")}<div class="status-text" style="margin:0">${esc(t.user?.email || "")}</div></td>
+      <td data-label="Category">${esc(t.category)}</td>
+      <td data-label="Subject">${esc(t.subject)}</td>
+      <td data-label="Status"><span class="pill ${t.status === "resolved" || t.status === "closed" ? "online" : t.status === "in-progress" ? "warn" : "off"}">${esc(t.status.toUpperCase())}</span></td>
+      <td data-label="Response">${t.adminNote ? esc(t.adminNote) : `<span class="status-text">none yet</span>`}</td>
+      <td data-label="Actions"><button class="btn small secondary" data-ticket-open="${esc(t._id)}">View / respond</button></td>
+      </tr>`).join("") || `<tr><td colspan="8" class="empty">No tickets here.</td></tr>`;
+  } catch (e) { toast(e.message); }
+}
+
+$("ticketAdminTable").addEventListener("click", event => {
+  const open = event.target.closest("[data-ticket-open]");
+  if (!open) return;
+  const ticket = ticketsCache.find(t => t._id === open.dataset.ticketOpen);
+  if (!ticket) return;
+  $("ticketDialogTitle").textContent = `${ticket.ticketNo} — ${ticket.subject}`;
+  $("ticketDialogMeta").textContent = `${ticket.user?.name || "(deleted)"} (${ticket.user?.email || ""}) · ${ticket.category}${ticket.meterId ? ` · ${ticket.meterId}` : ""} · ${new Date(ticket.createdAt).toLocaleString()}`;
+  $("ticketDialogDescription").textContent = ticket.description;
+  $("ticketStatusInput").value = ticket.status;
+  $("ticketNoteInput").value = ticket.adminNote || "";
+  $("ticketDialogMsg").textContent = "";
+  $("ticketUpdateForm").dataset.ticketId = ticket._id;
+  $("ticketDialog").showModal();
+});
+$("closeTicket").addEventListener("click", () => $("ticketDialog").close());
+
+$("ticketUpdateForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const id = event.target.dataset.ticketId;
+  try {
+    const r = await API.request(`/api/admin/tickets/${encodeURIComponent(id)}`, { method: "PUT", body: { status: $("ticketStatusInput").value, note: $("ticketNoteInput").value } });
+    toast(r.message);
+    $("ticketDialog").close();
+    await loadTicketsAdmin();
+  } catch (e) { $("ticketDialogMsg").textContent = e.message; }
 });
 
 /* ---------- wallets, plans, payment details ---------- */

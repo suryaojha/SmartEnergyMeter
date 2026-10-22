@@ -14,9 +14,9 @@ const appSettingsSchema = new mongoose.Schema({
   minRechargePaise: { type: Number, default: 1000 },
   qrFile: { type: String, default: "" },                // admin-uploaded static QR image
   // In-app feature toggles (undefined/missing on older documents is treated as "on" everywhere it's read)
-  featureNotifications: { type: Boolean, default: true },
   featureBillPdf: { type: Boolean, default: true },
-  featureSavingsTracker: { type: Boolean, default: true }
+  featureSavingsTracker: { type: Boolean, default: true },
+  whatsappNumber: { type: String, default: "", trim: true, maxlength: 20 }   // shown as a floating WhatsApp button when set
 }, { timestamps: true });
 
 module.exports = mongoose.model("AppSettings", appSettingsSchema);

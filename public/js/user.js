@@ -1,18 +1,20 @@
 let user, meters = [], charts = {}, currentMeter, refreshErrorShown = false, configFilledFor = null;
-let features = { notifications: true, billPdf: true, savingsTracker: true };
+let features = { billPdf: true, savingsTracker: true, whatsappNumber: "" };
 let lastConsumptionData = null;
 
 function openTab(tab) {
-  document.querySelectorAll(".user-navbtn").forEach(item => item.classList.toggle("active", item.dataset.tab === tab));
+  document.querySelectorAll(".sidebar .navbtn").forEach(item => item.classList.toggle("active", item.dataset.tab === tab));
   document.querySelectorAll(".user-section").forEach(item => item.classList.toggle("active", item.id === tab));
+  document.body.classList.remove("nav-open");
   window.scrollTo({ top: 0 });
   if (tab === "analytics") loadConsumption();
   if (tab === "meter") { loadAssignedConfig(); loadWifi(); loadMsebReading(); loadMsebHistory(); loadMsebComparison(); }
   if (tab === "presence") loadPresence();
   if (tab === "wallet") loadWallet();
   if (tab === "insights") loadAlertPrefs();
+  if (tab === "support") loadTickets();
 }
-document.querySelectorAll(".user-navbtn").forEach(button => button.addEventListener("click", () => openTab(button.dataset.tab)));
+document.querySelectorAll(".sidebar .navbtn").forEach(button => button.addEventListener("click", () => openTab(button.dataset.tab)));
 
 (async () => {
   user = await requireRole("User");
@@ -23,10 +25,6 @@ document.querySelectorAll(".user-navbtn").forEach(button => button.addEventListe
   setInterval(() => { if (!document.hidden) refreshLive(); }, 3000);
   setInterval(() => { if (!document.hidden) loadConsumption(); }, 30000);
   setInterval(() => { if (!document.hidden && $("meter").classList.contains("active")) loadWifi(); }, 5000);
-  if (features.notifications) {
-    loadNotifications();
-    setInterval(() => { if (!document.hidden) loadNotifications(); }, 20000);
-  }
 })();
 
 /* ---------- feature toggles ---------- */
@@ -34,42 +32,14 @@ async function loadFeatures() {
   try {
     features = await API.request("/api/user/features");
   } catch { /* keep defaults (all on) so the app still works if this call fails */ }
-  $("notifBtn").classList.toggle("hidden", !features.notifications);
   $("billPdfBtn").classList.toggle("hidden", !features.billPdf);
+  if (features.whatsappNumber) {
+    $("whatsappFloat").href = `https://wa.me/${features.whatsappNumber.replace(/[^\d]/g, "")}`;
+    $("whatsappFloat").classList.remove("hidden");
+  } else {
+    $("whatsappFloat").classList.add("hidden");
+  }
 }
-
-/* ---------- notifications ---------- */
-function notifHtml(n) {
-  return `<div class="alert-item ${n.read ? "" : "alert-high"}" data-notif="${esc(n._id)}" style="cursor:pointer"><b>${esc(n.title)}</b><span>${esc(n.body)}</span><span class="status-text" style="margin:0">${new Date(n.createdAt).toLocaleString()}</span></div>`;
-}
-
-async function loadNotifications() {
-  try {
-    const r = await API.request("/api/user/notifications");
-    $("notifBadge").textContent = r.unreadCount;
-    $("notifBadge").classList.toggle("hidden", !r.unreadCount);
-    $("notifList").innerHTML = r.notifications.map(notifHtml).join("") || `<div class="status-text">No notifications yet.</div>`;
-  } catch (e) { /* silent: do not interrupt the dashboard for a notification fetch failure */ }
-}
-
-$("notifBtn").addEventListener("click", async () => { await loadNotifications(); $("notifDialog").showModal(); });
-$("closeNotif").addEventListener("click", () => $("notifDialog").close());
-
-$("notifList").addEventListener("click", async event => {
-  const item = event.target.closest("[data-notif]");
-  if (!item) return;
-  try {
-    await API.request(`/api/user/notifications/${encodeURIComponent(item.dataset.notif)}/read`, { method: "POST" });
-    await loadNotifications();
-  } catch { /* non-critical */ }
-});
-
-$("markAllRead").addEventListener("click", async () => {
-  try {
-    await API.request("/api/user/notifications/read-all", { method: "POST" });
-    await loadNotifications();
-  } catch (e) { toast(e.message); }
-});
 
 function comparison(current, previous, label) {
   if (current == null || previous == null) return `${label}: -- (insufficient readings)`;
@@ -605,6 +575,77 @@ $("changePasswordForm").addEventListener("submit", async event => {
     $("changePasswordForm").reset();
     message.textContent = r.message;
   } catch (e) { message.textContent = e.message; }
+});
+
+/* ---------- support tickets ---------- */
+async function loadTickets() {
+  try {
+    const rows = await API.request("/api/user/tickets");
+    $("ticketTable").innerHTML = rows.map(t => `<tr>
+      <td data-label="Ticket">${esc(t.ticketNo)}</td>
+      <td data-label="Subject">${esc(t.subject)}</td>
+      <td data-label="Category">${esc(t.category)}</td>
+      <td data-label="Status"><span class="pill ${t.status === "resolved" || t.status === "closed" ? "online" : t.status === "in-progress" ? "warn" : "off"}">${esc(t.status.toUpperCase())}</span></td>
+      <td data-label="Response">${t.adminNote ? esc(t.adminNote) : `<span class="status-text">Awaiting response</span>`}</td>
+      </tr>`).join("") || `<tr><td colspan="5" class="empty">No tickets raised yet.</td></tr>`;
+  } catch (e) { toast(e.message); }
+}
+
+$("ticketForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const button = $("ticketSubmit"), message = $("ticketMessage");
+  button.disabled = true;
+  try {
+    const r = await API.request("/api/user/tickets", { method: "POST", body: {
+      category: $("ticketCategory").value, subject: $("ticketSubject").value, description: $("ticketDescription").value,
+      meterId: $("meterSelect").value || ""
+    } });
+    message.textContent = r.message;
+    toast(r.message);
+    $("ticketForm").reset();
+    await loadTickets();
+  } catch (e) { message.textContent = e.message; toast(e.message); }
+  finally { button.disabled = false; }
+});
+
+$("userGuideBtn").addEventListener("click", () => {
+  const sections = [
+    ["Overview", "Your Overview tab shows live readings, today's and this period's estimated cost, your current tariff slab, and a running cost-per-hour estimate."],
+    ["Usage analytics", "The Usage tab charts your consumption by hour, day, week and month, and lets you export readings as a CSV file."],
+    ["Wallet & subscription", "The Wallet tab is for the meter-monitoring subscription (not your electricity bill). Recharge by UPI, then subscribe a plan to each meter. Submit your payment screenshot and UTR; the administrator verifies and credits your wallet."],
+    ["Existing MSEB meter reading", "Before your ESP32 goes online, record the reading on your old MSEB meter (a number plus a photo) in the My meter tab. This is saved once immediately; any later correction needs admin approval."],
+    ["MSEB bill history", "In the same tab, submit up to a few previous months of your actual MSEB bill (reading, amount, photo). Once an administrator approves a month, it appears in a side-by-side chart against this system's own meter for that month."],
+    ["Downloading your bill", "On the Overview tab, use “Download bill (PDF)” to get a printable breakdown of the current period's estimated charges for your own records."],
+    ["Raising a support ticket", "Use the Support tab to raise a ticket for any billing, meter or technical issue. Each ticket gets a ticket number and a status (open, in progress, resolved, closed) that you can track here, along with the administrator's response once given."],
+    ["Contacting support directly", "Use the WhatsApp button (bottom-right, where available) to message your administrator directly for urgent issues."]
+  ];
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Smart Energy Meter — User Guide</title>
+    <style>
+      *{box-sizing:border-box} body{font-family:'Segoe UI',Arial,sans-serif;color:#172033;background:#eef1ee;margin:0;padding:36px 16px}
+      .sheet{max-width:720px;margin:auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,.08)}
+      .head{background:#0f1a2b;color:#fbfbf8;padding:28px 32px}
+      .head .brand{font-size:14px;font-weight:700;letter-spacing:1px;color:#f2a93c;text-transform:uppercase;margin:0 0 6px}
+      .head h1{font-size:22px;margin:0 0 4px}
+      .head p{margin:0;color:#b9c3ce;font-size:13px}
+      .body{padding:12px 32px 28px}
+      h2{font-size:17px;color:#0f1a2b;margin:22px 0 6px}
+      p{font-size:14px;line-height:1.6;color:#4a5568;margin:0}
+      .printBtn{display:block;width:calc(100% - 64px);margin:8px 32px 28px;padding:14px;border-radius:10px;border:none;background:#2563eb;color:#fff;font-size:15px;font-weight:700;cursor:pointer}
+      @media (max-width:480px){.head{padding:22px 18px}.body{padding:8px 18px 22px}.printBtn{width:calc(100% - 36px);margin:8px 18px 22px}}
+      @media print{body{background:#fff;padding:0}.sheet{box-shadow:none;border-radius:0}.printBtn{display:none}}
+    </style></head><body>
+    <div class="sheet">
+      <div class="head"><p class="brand">⚡ Smart Energy Meter</p><h1>User guide &amp; SOP</h1><p>How to use your dashboard, step by step</p></div>
+      <div class="body">
+        ${sections.map(([title, body]) => `<h2>${esc(title)}</h2><p>${esc(body)}</p>`).join("")}
+      </div>
+      <button class="printBtn" onclick="window.print()">⬇ Print / Save as PDF</button>
+    </div>
+    </body></html>`;
+  const win = window.open("", "_blank");
+  if (!win) { toast("Allow pop-ups to download the guide."); return; }
+  win.document.write(html);
+  win.document.close();
 });
 
 /* ---------- wallet & subscription ---------- */

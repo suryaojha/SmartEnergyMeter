@@ -27,6 +27,7 @@ const PaymentRequest = require("./models/PaymentRequest");
 const ReadingChangeRequest = require("./models/ReadingChangeRequest");
 const Notification = require("./models/Notification");
 const MsebBillHistory = require("./models/MsebBillHistory");
+const Ticket = require("./models/Ticket");
 const fs = require("fs");
 const { auth, adminOnly } = require("./middleware/auth");
 
@@ -261,8 +262,6 @@ async function getAppSettings() {
 async function notifyBell(userId, title, body, kind = "", meterId = "") {
   try {
     if (!userId) return;
-    const settings = await getAppSettings();
-    if (settings.featureNotifications === false) return;
     await Notification.create({ userId, title, body: String(body || "").slice(0, 400), kind, meterId });
   } catch (error) {
     console.error("Notification create failed:", error.message);
@@ -1462,27 +1461,30 @@ app.post("/api/user/meters/:meterId/mseb-reading/change-request", auth, uploadJs
 app.get("/api/user/features", auth, async (req, res) => {
   const settings = await getAppSettings();
   res.json({
-    notifications: settings.featureNotifications !== false,
     billPdf: settings.featureBillPdf !== false,
-    savingsTracker: settings.featureSavingsTracker !== false
+    savingsTracker: settings.featureSavingsTracker !== false,
+    whatsappNumber: settings.whatsappNumber || ""
   });
 });
 
 app.get("/api/admin/features", auth, adminOnly, async (req, res) => {
   const settings = await getAppSettings();
   res.json({
-    notifications: settings.featureNotifications !== false,
     billPdf: settings.featureBillPdf !== false,
-    savingsTracker: settings.featureSavingsTracker !== false
+    savingsTracker: settings.featureSavingsTracker !== false,
+    whatsappNumber: settings.whatsappNumber || ""
   });
 });
 
 app.put("/api/admin/features", auth, adminOnly, async (req, res) => {
   const updates = {};
-  for (const [key, field] of [["notifications", "featureNotifications"], ["billPdf", "featureBillPdf"], ["savingsTracker", "featureSavingsTracker"]]) {
+  for (const [key, field] of [["billPdf", "featureBillPdf"], ["savingsTracker", "featureSavingsTracker"]]) {
     if (typeof req.body[key] !== "boolean") return res.status(400).json({ message: `${key} must be true or false` });
     updates[field] = req.body[key];
   }
+  const whatsappNumber = String(req.body.whatsappNumber || "").replace(/[^\d+]/g, "").slice(0, 20);
+  if (whatsappNumber && !/^\+?\d{8,15}$/.test(whatsappNumber)) return res.status(400).json({ message: "Enter a valid WhatsApp number with country code." });
+  updates.whatsappNumber = whatsappNumber;
   await AppSettings.updateOne({ key: "default" }, { $set: updates }, { upsert: true });
   await logActivity(req.user, "feature-toggles", "", JSON.stringify(req.body));
   res.json({ message: "Feature settings saved." });
@@ -1807,7 +1809,7 @@ app.get("/api/meters/:meterId/consumption", auth, async (req, res) => {
 
   const elapsedDays = Math.max(1, Math.ceil((end.getTime() - cycleStart.getTime()) / 86400000));
   const cycleLengthDays = Math.max(1, Math.ceil((cycleEnd.getTime() - cycleStart.getTime()) / 86400000));
-  const recurringCharges = monthBill.cost == null ? 0 : monthBill.fixedCharges + monthBill.otherCharges;
+  const recurringCharges = monthBill.cost == null ? 0 : monthBill.fixedCharges + monthBill.otherCharges + monthBill.fac;
   const expectedBill = monthBill.cost == null ? null :
     Number(((monthBill.cost - recurringCharges) * cycleLengthDays / elapsedDays + recurringCharges).toFixed(2));
   const mostExpensiveHour = hourly.reduce((best, row) => row.cost != null && (!best || row.cost > best.cost) ? row : best, null);
@@ -2509,6 +2511,68 @@ app.post("/api/admin/mseb-history/:id/reject", auth, adminOnly, async (req, res)
     notifyBell(user._id, "MSEB bill history not approved", `${entry.month} for ${entry.meterId}: ${note}`, "mseb-history", entry.meterId);
   }
   res.json({ message: "Entry rejected and the user was notified." });
+});
+
+// --- support tickets ---
+const TICKET_CATEGORIES = ["billing", "meter", "technical", "other"];
+const TICKET_STATUSES = ["open", "in-progress", "resolved", "closed"];
+
+function ticketView(t) {
+  return {
+    _id: t._id, ticketNo: t.ticketNo, category: t.category, subject: t.subject, description: t.description,
+    meterId: t.meterId, status: t.status, adminNote: t.adminNote, reviewedBy: t.reviewedBy, reviewedAt: t.reviewedAt, createdAt: t.createdAt
+  };
+}
+
+app.get("/api/user/tickets", auth, async (req, res) => {
+  const rows = await Ticket.find({ userId: req.user._id }).sort({ createdAt: -1 }).limit(50).lean();
+  res.json(rows.map(ticketView));
+});
+
+app.post("/api/user/tickets", auth, async (req, res) => {
+  const category = TICKET_CATEGORIES.includes(req.body.category) ? req.body.category : "other";
+  const subject = String(req.body.subject || "").trim().slice(0, 120);
+  const description = String(req.body.description || "").trim().slice(0, 2000);
+  const meterId = String(req.body.meterId || "").trim().toUpperCase();
+  if (!subject) return res.status(400).json({ message: "Enter a subject for the ticket." });
+  if (!description) return res.status(400).json({ message: "Describe the issue." });
+  if (await Ticket.countDocuments({ userId: req.user._id, status: { $in: ["open", "in-progress"] } }) >= 10) {
+    return res.status(429).json({ message: "You already have 10 open tickets. Please wait for the administrator to respond to some of them." });
+  }
+  const ticketNo = `TKT-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
+  const ticket = await Ticket.create({ ticketNo, userId: req.user._id, meterId, category, subject, description });
+  await logActivity(req.user, "ticket-raised", ticket.ticketNo, subject);
+  res.status(201).json({ message: `Ticket ${ticket.ticketNo} submitted.`, ticket: ticketView(ticket) });
+  User.find({ role: "Admin", active: true }).select("name email").lean().then(admins => Promise.all(admins.map(admin =>
+    notifyUser(admin, "New support ticket", [`${req.user.name} (${req.user.email}) raised ticket ${ticket.ticketNo}: ${subject}. Open Support tickets in the admin dashboard to review.`], "ticket raised")))).catch(() => {});
+});
+
+app.get("/api/admin/tickets", auth, adminOnly, async (req, res) => {
+  const filter = TICKET_STATUSES.includes(req.query.status) ? { status: req.query.status } : {};
+  const [rows, open] = await Promise.all([
+    Ticket.find(filter).sort({ createdAt: -1 }).limit(300).populate("userId", "name email").lean(),
+    Ticket.countDocuments({ status: { $in: ["open", "in-progress"] } })
+  ]);
+  res.json({
+    open,
+    tickets: rows.map(t => ({ ...ticketView(t), user: t.userId ? { name: t.userId.name, email: t.userId.email } : null }))
+  });
+});
+
+app.put("/api/admin/tickets/:id", auth, adminOnly, async (req, res) => {
+  if (!OBJECT_ID.test(req.params.id)) return res.status(404).json({ message: "Ticket not found" });
+  if (!TICKET_STATUSES.includes(req.body.status)) return res.status(400).json({ message: "Choose a valid status." });
+  const note = String(req.body.note || "").trim().slice(0, 1000);
+  const ticket = await Ticket.findByIdAndUpdate(req.params.id,
+    { $set: { status: req.body.status, adminNote: note, reviewedBy: req.user.email, reviewedAt: new Date() } }, { new: true });
+  if (!ticket) return res.status(404).json({ message: "Ticket not found" });
+  await logActivity(req.user, "ticket-updated", ticket.ticketNo, `${req.body.status}${note ? `: ${note}` : ""}`);
+  const user = await User.findById(ticket.userId).select("name email").lean();
+  if (user) {
+    notifyUser(user, `Ticket ${ticket.ticketNo} updated`, [`Your ticket "${ticket.subject}" is now ${req.body.status.toUpperCase()}.`, note ? `Response: ${note}` : "No additional response was given."], "ticket updated");
+    notifyBell(user._id, `Ticket ${ticket.ticketNo} updated`, `Status: ${req.body.status}${note ? ` — ${note}` : ""}`, "ticket", ticket.meterId);
+  }
+  res.json({ message: "Ticket updated and the user was notified." });
 });
 
 app.get("/api/admin/reading-requests", auth, adminOnly, async (req, res) => {
