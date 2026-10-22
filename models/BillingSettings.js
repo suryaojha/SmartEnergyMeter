@@ -7,6 +7,7 @@ const billingSettingsSchema = new mongoose.Schema({
   facPerKwh: { type: Number, default: 0, min: 0 },
   electricityDutyPercent: { type: Number, default: 0, min: 0 },
   wheelingChargePerKwh: { type: Number, default: 0, min: 0 },
+  taxOnSalePerKwh: { type: Number, default: 0, min: 0 },
   otherCharges: { type: Number, default: 0, min: 0 },
   dailyCostLimit: { type: Number, default: null, min: 0 },
   monthlyCostLimit: { type: Number, default: null, min: 0 },

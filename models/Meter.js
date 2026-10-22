@@ -19,6 +19,7 @@ const meterSchema = new mongoose.Schema({
   autoRenewPlanId: { type: mongoose.Schema.Types.ObjectId, ref: "Plan", default: null },
   expiryReminderFor: { type: String, default: "" },
   userConfigAllowed: { type: Boolean, default: true },
+  msebDataAllowed: { type: Boolean, default: true },
   firmware: { type: String, default: "" },
   rssi: { type: Number, default: null },
   updateFrequency: { type: Number, default: 5, min: 1, max: 3600 },

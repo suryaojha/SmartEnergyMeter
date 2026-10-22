@@ -11,7 +11,7 @@
 <body>
   <header class="topbar">
     <div class="brand">⚡ Energy <span>Meter</span></div>
-    <div class="userbox"><span id="userName"></span><button id="notifBtn" class="icon-btn hidden" aria-label="Notifications">🔔<span id="notifBadge" class="pill warn hidden" style="margin-left:2px">0</span></button><button id="themeBtn" class="icon-btn" aria-label="Toggle theme">◐</button><button class="btn small secondary" onclick="logout()">Logout</button></div>
+    <div class="userbox"><span id="userName"></span><button id="notifBtn" class="icon-btn hidden" aria-label="Notifications">📣<span id="notifBadge" class="pill warn hidden" style="margin-left:2px">0</span></button><button id="themeBtn" class="icon-btn" aria-label="Toggle theme">◐</button><button class="btn small secondary" onclick="logout()">Logout</button></div>
   </header>
   <main class="user-main">
     <div class="page-head">
@@ -65,9 +65,10 @@
       <div class="panel">
         <div class="toolbar" style="margin:0"><b>Bill estimate</b><div style="display:flex;align-items:center;gap:10px"><button id="billPdfBtn" class="btn small secondary hidden" type="button">⬇ Download bill (PDF)</button><span id="billTotal" class="metric compact">--</span></div></div>
         <div class="grid three billing-breakdown">
-          <div>Energy charges <b id="energyCharges">--</b></div><div>FAC <b id="facCharge">--</b></div>
-          <div>Electricity duty <b id="dutyCharge">--</b></div><div>Wheeling <b id="wheelingCharge">--</b></div>
-          <div>Fixed charges <b id="fixedCharge">--</b></div><div>Other charges <b id="otherCharge">--</b></div>
+          <div>EC &mdash; Energy charges <b id="energyCharges">--</b></div><div>Fuel Adjustment Charges <b id="facCharge">--</b></div>
+          <div>ED <span id="dutyRate" class="status-text" style="margin:0">(0%)</span> <b id="dutyCharge">--</b></div><div>Wheeling charges <b id="wheelingCharge">--</b></div>
+          <div>Tax on sale <span id="taxRate" class="status-text" style="margin:0">(@0ps/u)</span> <b id="taxCharge">--</b></div><div>FC &mdash; Fixed charge <b id="fixedCharge">--</b></div>
+          <div>Other charges <b id="otherCharge">--</b></div>
         </div>
         <p class="status-text">Estimated from the tariff your administrator configured; your utility bill may differ.</p>
       </div>
@@ -151,6 +152,45 @@
         <div id="dataDisabled" class="notice warn hidden" style="margin-top:12px">⏸ Data collection is OFF for this meter.</div>
       </div>
 
+      <div class="panel">
+        <h2 class="section-title" style="margin-top:0">Existing MSEB meter reading</h2>
+        <p class="status-text" style="margin-top:0">Before this meter goes online, record the reading on your old MSEB meter so your usage can be tracked from the right starting point.</p>
+        <div id="msebLocked" class="notice warn hidden">🔒 Your administrator has not allowed you to add MSEB data for this meter.</div>
+        <div id="msebSaved" class="hidden">
+          <dl class="kv"><dt>Recorded reading</dt><dd id="msebReadingValue">--</dd><dt>Submitted</dt><dd id="msebReadingDate">--</dd></dl>
+          <img id="msebPhoto" alt="Old MSEB meter photo" style="max-width:220px;border-radius:12px;border:1px solid var(--border);margin:8px 0;display:block">
+          <div id="msebPendingNotice" class="notice warn hidden" style="margin-top:8px"></div>
+          <button id="msebRequestChangeBtn" class="btn secondary" type="button">Request a change</button>
+        </div>
+        <form id="msebForm" class="hidden" style="display:grid;gap:12px;max-width:420px;margin-top:8px">
+          <div class="field"><label for="msebReading">Current reading on old meter (kWh)</label><input id="msebReading" type="number" min="0" max="999999" step="0.01" required></div>
+          <div class="field"><label for="msebPhotoInput">Photo of the meter display</label><input id="msebPhotoInput" type="file" accept="image/png,image/jpeg,image/webp" required></div>
+          <div class="actions"><button id="msebSubmit" class="btn" type="submit">Save reading</button><button id="msebCancel" class="btn secondary hidden" type="button">Cancel</button></div>
+          <p id="msebMessage" class="status-text" role="status" aria-live="polite"></p>
+        </form>
+      </div>
+
+      <div class="panel">
+        <h2 class="section-title" style="margin-top:0">Previous 3 months &mdash; MSEB bill history</h2>
+        <p class="status-text" style="margin-top:0">Submit your last MSEB bills (reading + amount charged) so your administrator can approve them and we can show how our meter compares, month by month.</p>
+        <div id="msebHistoryLocked" class="notice warn hidden">🔒 Your administrator has not allowed you to add MSEB data for this meter.</div>
+        <form id="msebHistoryForm" style="display:grid;gap:12px;max-width:520px;grid-template-columns:repeat(2,1fr)">
+          <div class="field"><label for="msebHistoryMonth">Billing month</label><input id="msebHistoryMonth" type="month" required></div>
+          <div class="field"><label for="msebHistoryReading">MSEB reading (kWh)</label><input id="msebHistoryReading" type="number" min="0" max="999999" step="0.01" required></div>
+          <div class="field" style="grid-column:1/-1"><label for="msebHistoryAmount">MSEB bill amount (₹)</label><input id="msebHistoryAmount" type="number" min="0" max="9999999" step="0.01" required></div>
+          <div class="field" style="grid-column:1/-1"><label for="msebHistoryPhoto">Photo of the bill / meter</label><input id="msebHistoryPhoto" type="file" accept="image/png,image/jpeg,image/webp" required></div>
+          <div class="actions" style="grid-column:1/-1"><button id="msebHistorySubmit" class="btn" type="submit">Submit for approval</button></div>
+          <p id="msebHistoryMessage" class="status-text" style="grid-column:1/-1" role="status" aria-live="polite"></p>
+        </form>
+        <div class="table-wrap" style="margin-top:14px"><table class="table stack"><thead><tr><th>Month</th><th>MSEB reading</th><th>MSEB bill</th><th>Status</th></tr></thead><tbody id="msebHistoryTable"></tbody></table></div>
+        <div id="msebComparisonArea" class="hidden" style="margin-top:20px">
+          <div class="grid two">
+            <div class="panel"><b>Units consumed (kWh)</b><div class="chart-box"><canvas id="msebKwhChart"></canvas></div></div>
+            <div class="panel"><b>Bill amount (₹)</b><div class="chart-box"><canvas id="msebCostChart"></canvas></div></div>
+          </div>
+        </div>
+      </div>
+
       <div id="configLocked" class="notice warn hidden" style="margin-top:14px">🔒 Your administrator has not allowed you to configure this meter. You can still view everything below.</div>
 
       <div id="configArea">
@@ -162,23 +202,6 @@
           </div>
           <div class="form-actions"><button class="btn" type="submit">Save meter settings</button></div>
         </form>
-
-        <div class="panel">
-          <h2 class="section-title" style="margin-top:0">Existing MSEB meter reading</h2>
-          <p class="status-text" style="margin-top:0">Before this meter goes online, record the reading on your old MSEB meter so your usage can be tracked from the right starting point.</p>
-          <div id="msebSaved" class="hidden">
-            <dl class="kv"><dt>Recorded reading</dt><dd id="msebReadingValue">--</dd><dt>Submitted</dt><dd id="msebReadingDate">--</dd></dl>
-            <img id="msebPhoto" alt="Old MSEB meter photo" style="max-width:220px;border-radius:12px;border:1px solid var(--border);margin:8px 0;display:block">
-            <div id="msebPendingNotice" class="notice warn hidden" style="margin-top:8px"></div>
-            <button id="msebRequestChangeBtn" class="btn secondary" type="button">Request a change</button>
-          </div>
-          <form id="msebForm" class="hidden" style="display:grid;gap:12px;max-width:420px;margin-top:8px">
-            <div class="field"><label for="msebReading">Current reading on old meter (kWh)</label><input id="msebReading" type="number" min="0" max="999999" step="0.01" required></div>
-            <div class="field"><label for="msebPhotoInput">Photo of the meter display</label><input id="msebPhotoInput" type="file" accept="image/png,image/jpeg,image/webp" required></div>
-            <div class="actions"><button id="msebSubmit" class="btn" type="submit">Save reading</button><button id="msebCancel" class="btn secondary hidden" type="button">Cancel</button></div>
-            <p id="msebMessage" class="status-text" role="status" aria-live="polite"></p>
-          </form>
-        </div>
 
         <div class="panel">
           <h2 class="section-title" style="margin-top:0">Wi-Fi for this meter</h2>

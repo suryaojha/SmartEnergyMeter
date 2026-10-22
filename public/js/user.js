@@ -7,7 +7,7 @@ function openTab(tab) {
   document.querySelectorAll(".user-section").forEach(item => item.classList.toggle("active", item.id === tab));
   window.scrollTo({ top: 0 });
   if (tab === "analytics") loadConsumption();
-  if (tab === "meter") { loadAssignedConfig(); loadWifi(); loadMsebReading(); }
+  if (tab === "meter") { loadAssignedConfig(); loadWifi(); loadMsebReading(); loadMsebHistory(); loadMsebComparison(); }
   if (tab === "presence") loadPresence();
   if (tab === "wallet") loadWallet();
   if (tab === "insights") loadAlertPrefs();
@@ -99,7 +99,7 @@ $("meterSelect").onchange = async () => {
   configFilledFor = null;
   renderLive(currentMeter);
   await loadConsumption();
-  if ($("meter").classList.contains("active")) { loadAssignedConfig(); loadWifi(); loadMsebReading(); }
+  if ($("meter").classList.contains("active")) { loadAssignedConfig(); loadWifi(); loadMsebReading(); loadMsebHistory(); loadMsebComparison(); }
   if ($("presence").classList.contains("active")) loadPresence();
 };
 $("graphPeriod").onchange = loadConsumption;
@@ -221,6 +221,8 @@ let msebMode = "initial"; // "initial" | "change"
 
 async function loadMsebReading() {
   if (!currentMeter) return;
+  const allowed = currentMeter.msebDataAllowed !== false;
+  $("msebLocked").classList.toggle("hidden", allowed);
   try {
     const r = await API.request(`/api/user/meters/${encodeURIComponent(currentMeter.meterId)}/mseb-reading`);
     $("msebForm").reset();
@@ -228,7 +230,7 @@ async function loadMsebReading() {
     if (r.reading == null) {
       msebMode = "initial";
       $("msebSaved").classList.add("hidden");
-      $("msebForm").classList.remove("hidden");
+      $("msebForm").classList.toggle("hidden", !allowed);
       $("msebCancel").classList.add("hidden");
     } else {
       $("msebSaved").classList.remove("hidden");
@@ -238,6 +240,7 @@ async function loadMsebReading() {
       $("msebPhoto").src = await API.blobUrl(`/api/user/meters/${encodeURIComponent(currentMeter.meterId)}/mseb-reading/photo`);
       $("msebPendingNotice").classList.toggle("hidden", !r.pending);
       if (r.pending) $("msebPendingNotice").textContent = `Change request pending: ${r.pending.reading} kWh, submitted ${new Date(r.pending.createdAt).toLocaleString()}. Waiting for administrator approval.`;
+      $("msebRequestChangeBtn").classList.toggle("hidden", !allowed);
     }
   } catch (e) { toast(e.message); }
 }
@@ -272,6 +275,68 @@ $("msebForm").addEventListener("submit", async event => {
   finally { button.disabled = false; }
 });
 
+/* ---------- MSEB bill history (previous months) + comparison ---------- */
+async function loadMsebHistory() {
+  if (!currentMeter) return;
+  const allowed = currentMeter.msebDataAllowed !== false;
+  $("msebHistoryLocked").classList.toggle("hidden", allowed);
+  $("msebHistoryForm").classList.toggle("hidden", !allowed);
+  try {
+    const rows = await API.request(`/api/user/meters/${encodeURIComponent(currentMeter.meterId)}/mseb-history`);
+    $("msebHistoryTable").innerHTML = rows.map(h => `<tr>
+      <td data-label="Month">${esc(h.month)}</td>
+      <td data-label="MSEB reading">${h.msebReadingKwh} kWh</td>
+      <td data-label="MSEB bill">${inr(h.msebBillAmount)}</td>
+      <td data-label="Status"><span class="pill ${h.status === "approved" ? "online" : h.status === "rejected" ? "offline" : "warn"}">${esc(h.status.toUpperCase())}</span>${h.adminNote ? `<div class="status-text" style="margin:0">${esc(h.adminNote)}</div>` : ""}</td>
+      </tr>`).join("") || `<tr><td colspan="4" class="empty">No months submitted yet.</td></tr>`;
+  } catch (e) { toast(e.message); }
+}
+
+$("msebHistoryForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const button = $("msebHistorySubmit"), message = $("msebHistoryMessage");
+  const file = $("msebHistoryPhoto").files[0];
+  if (!file) { message.textContent = "Attach a photo of the bill or meter."; return; }
+  button.disabled = true;
+  message.textContent = "Uploading…";
+  try {
+    const r = await API.request(`/api/user/meters/${encodeURIComponent(currentMeter.meterId)}/mseb-history`, { method: "POST", body: {
+      month: $("msebHistoryMonth").value, msebReadingKwh: Number($("msebHistoryReading").value), msebBillAmount: Number($("msebHistoryAmount").value), photo: await fileToDataUrl(file)
+    } });
+    message.textContent = r.message;
+    toast(r.message);
+    $("msebHistoryForm").reset();
+    await loadMsebHistory();
+    await loadMsebComparison();
+  } catch (e) { message.textContent = e.message; toast(e.message); }
+  finally { button.disabled = false; }
+});
+
+async function loadMsebComparison() {
+  if (!currentMeter) return;
+  try {
+    const { months } = await API.request(`/api/user/meters/${encodeURIComponent(currentMeter.meterId)}/mseb-comparison`);
+    $("msebComparisonArea").classList.toggle("hidden", !months.length);
+    if (!months.length) return;
+    renderComparisonChart("msebKwhChart", months.map(m => m.month), months.map(m => m.ourKwh), months.map(m => m.msebKwh), "Our meter", "MSEB");
+    renderComparisonChart("msebCostChart", months.map(m => m.month), months.map(m => m.ourCost), months.map(m => m.msebCost), "Our estimate", "MSEB bill");
+  } catch (e) { toast(e.message); }
+}
+
+// Two-series grouped bar: fixed categorical order (our meter = blue, MSEB = orange), identity encoding.
+function renderComparisonChart(id, labels, ourValues, msebValues, ourLabel, msebLabel) {
+  if (charts[id]) charts[id].destroy();
+  if (typeof Chart === "undefined") return;
+  charts[id] = new Chart($(id), {
+    type: "bar",
+    data: { labels, datasets: [
+      { label: ourLabel, data: ourValues, backgroundColor: "#2a78d6", borderRadius: 4 },
+      { label: msebLabel, data: msebValues, backgroundColor: "#eb6834", borderRadius: 4 }
+    ] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: true, position: "bottom" } }, scales: { y: { beginAtZero: true }, x: { ticks: { maxRotation: 0 } } } }
+  });
+}
+
 /* ---------- what the admin configured ---------- */
 async function loadAssignedConfig() {
   try {
@@ -281,9 +346,10 @@ async function loadAssignedConfig() {
     const row = (k, v) => `<dt>${k}</dt><dd>${v}</dd>`;
     const lim = (v, unit) => v == null ? "not set" : `${v} ${unit}`;
     $("billingKv").innerHTML = [
-      row("Billing cycle starts", `day ${b.billingCycleStartDay ?? 1}`), row("Fixed charge", `₹${b.fixedCharge ?? 0} / cycle`),
-      row("FAC", `₹${b.facPerKwh ?? 0} / kWh`), row("Electricity duty", `${b.electricityDutyPercent ?? 0}%`),
-      row("Wheeling", `₹${b.wheelingChargePerKwh ?? 0} / kWh`), row("Other charges", `₹${b.otherCharges ?? 0} / cycle`),
+      row("Billing cycle starts", `day ${b.billingCycleStartDay ?? 1}`), row("FC &mdash; Fixed charge", `₹${b.fixedCharge ?? 0} / cycle`),
+      row("Fuel Adjustment Charges", `₹${b.facPerKwh ?? 0} / kWh`), row("ED &mdash; Electricity duty", `${b.electricityDutyPercent ?? 0}%`),
+      row("Wheeling charges", `₹${b.wheelingChargePerKwh ?? 0} / kWh`), row("Tax on sale", `@${Math.round((b.taxOnSalePerKwh ?? 0) * 100)}ps/u`),
+      row("Other charges", `₹${b.otherCharges ?? 0} / cycle`),
       row("Daily cost limit", lim(b.dailyCostLimit, "₹")), row("Monthly budget", lim(b.monthlyCostLimit, "₹")),
       row("Daily energy limit", lim(b.dailyEnergyLimit, "kWh")), row("Daily target", lim(b.consumptionTargetKwh, "kWh")),
       row("Voltage range", b.minVoltage == null && b.maxVoltage == null ? "not set" : `${b.minVoltage ?? "–"} to ${b.maxVoltage ?? "–"} V`),
@@ -322,30 +388,55 @@ function renderSavingsBadge(summary) {
 /* ---------- bill PDF ---------- */
 $("billPdfBtn").addEventListener("click", () => {
   if (!lastConsumptionData) return;
-  const { meter, summary, slabs } = lastConsumptionData;
+  const { meter, summary } = lastConsumptionData;
   const bill = summary.monthBill;
   const period = summary.billingPeriod ? `${new Date(summary.billingPeriod.start).toLocaleDateString()} – ${new Date(summary.billingPeriod.end).toLocaleDateString()}` : "--";
-  const row = (label, value) => `<tr><td>${esc(label)}</td><td style="text-align:right">${esc(value)}</td></tr>`;
+  const line = (code, label, rate, value, big) => `<tr class="${big ? "total" : ""}"><td><span class="code">${esc(code)}</span>${esc(label)}${rate ? `<span class="rate">${esc(rate)}</span>` : ""}</td><td class="amt">${esc(value)}</td></tr>`;
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>Bill — ${esc(meter.meterName || meter.meterId)}</title>
-    <style>body{font-family:Arial,sans-serif;color:#172033;padding:32px;max-width:640px;margin:auto}h1{font-size:20px;margin:0 0 4px}
-    table{width:100%;border-collapse:collapse;margin-top:16px}td{padding:8px 4px;border-bottom:1px solid #e2e8f0}
-    tr.total td{font-weight:800;border-top:2px solid #172033;border-bottom:none}.muted{color:#64748b;font-size:13px}
-    @media print{button{display:none}}</style></head><body>
-    <h1>Smart Energy Meter — Bill estimate</h1>
-    <p class="muted">Meter: ${esc(meter.meterName || meter.meterId)} (${esc(meter.meterId)}) · Billing period ${esc(period)}</p>
-    <table>
-      ${row("Units consumed", `${display(bill.kwh, " kWh", 3)}`)}
-      ${bill.currentSlab ? row("Tariff slab", `${esc(bill.currentSlab.name)} · ₹${bill.currentSlab.ratePerKwh}/kWh`) : ""}
-      ${row("Energy charges", inr(bill.energyCharges))}
-      ${row("FAC", inr(bill.fac))}
-      ${row("Electricity duty", inr(bill.electricityDuty))}
-      ${row("Wheeling charges", inr(bill.wheelingCharges))}
-      ${row("Fixed charges", inr(bill.fixedCharges))}
-      ${row("Other charges", inr(bill.otherCharges))}
-      <tr class="total">${row("Total (estimated)", inr(bill.cost)).replace(/<tr>|<\/tr>/g, "")}</tr>
-    </table>
-    <p class="muted">Estimated from the tariff configured by your administrator; this is not an official MSEB bill. Generated ${new Date().toLocaleString()}.</p>
-    <button class="btn" onclick="window.print()" style="margin-top:16px;padding:10px 18px;border-radius:8px;border:none;background:#2563eb;color:#fff;cursor:pointer">Print / Save as PDF</button>
+    <style>
+      *{box-sizing:border-box} body{font-family:'Segoe UI',Arial,sans-serif;color:#172033;background:#eef1ee;margin:0;padding:36px 16px}
+      .sheet{max-width:640px;margin:auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,.08)}
+      .head{background:#0f1a2b;color:#fbfbf8;padding:28px 32px}
+      .head .brand{font-size:14px;font-weight:700;letter-spacing:1px;color:#f2a93c;text-transform:uppercase;margin:0 0 6px}
+      .head h1{font-size:22px;margin:0 0 4px}
+      .head p{margin:0;color:#b9c3ce;font-size:13px}
+      .meta{display:flex;justify-content:space-between;padding:20px 32px;border-bottom:1px solid #e3e6e4;font-size:13px;color:#4a5568}
+      .meta b{color:#172033;display:block;font-size:14px}
+      table{width:100%;border-collapse:collapse}
+      td{padding:14px 32px;border-bottom:1px solid #eef1ee;font-size:14.5px}
+      .code{display:inline-block;min-width:30px;font-weight:700;color:#c9801a;margin-right:4px}
+      .rate{display:block;color:#8a93a3;font-size:12px;margin-top:2px}
+      .amt{text-align:right;font-weight:600;white-space:nowrap}
+      tr.total td{font-weight:800;font-size:19px;border-top:2px solid #0f1a2b;border-bottom:none;background:#f6f7f4}
+      tr.total .amt{color:#c9801a}
+      .foot{padding:18px 32px 28px;color:#8a93a3;font-size:12px;line-height:1.6}
+      .printBtn{display:block;width:calc(100% - 64px);margin:0 32px 28px;padding:14px;border-radius:10px;border:none;background:#2563eb;color:#fff;font-size:15px;font-weight:700;cursor:pointer}
+      @media print{body{background:#fff;padding:0}.sheet{box-shadow:none;border-radius:0}.printBtn{display:none}}
+    </style></head><body>
+    <div class="sheet">
+      <div class="head">
+        <p class="brand">⚡ Smart Energy Meter</p>
+        <h1>Bill estimate</h1>
+        <p>Not an official MSEB bill &mdash; for your own records</p>
+      </div>
+      <div class="meta">
+        <div>Meter<b>${esc(meter.meterName || meter.meterId)} (${esc(meter.meterId)})</b></div>
+        <div style="text-align:right">Billing period<b>${esc(period)}</b></div>
+      </div>
+      <table>
+        <tr><td>Units consumed${bill.currentSlab ? `<span class="rate">${esc(bill.currentSlab.name)} &middot; ₹${bill.currentSlab.ratePerKwh}/kWh</span>` : ""}</td><td class="amt">${display(bill.kwh, " kWh", 3)}</td></tr>
+        ${line("EC", "Energy charges", "", inr(bill.energyCharges))}
+        ${line("", "Fuel Adjustment Charges", "", inr(bill.fac))}
+        ${line("ED", "Electricity duty", `${bill.electricityDutyPercent ?? 0}%`, inr(bill.electricityDuty))}
+        ${line("", "Wheeling charges", "", inr(bill.wheelingCharges))}
+        ${line("", "Tax on sale", `@${Math.round((bill.taxOnSalePerKwh ?? 0) * 100)}ps/u`, inr(bill.taxOnSale))}
+        ${line("FC", "Fixed charge", "", inr(bill.fixedCharges))}
+        ${line("", "Other charges", "", inr(bill.otherCharges))}
+        ${line("", "Total (estimated)", "", inr(bill.cost), true)}
+      </table>
+      <p class="foot">Estimated from the tariff and charges configured by your administrator. Your official MSEB bill may differ. Generated ${new Date().toLocaleString()}.</p>
+      <button class="printBtn" onclick="window.print()">⬇ Print / Save as PDF</button>
+    </div>
     </body></html>`;
   const win = window.open("", "_blank");
   if (!win) { toast("Allow pop-ups to download the bill."); return; }
@@ -403,7 +494,10 @@ function renderAnalytics(data) {
   $("energyCharges").textContent = money(bill.energyCharges);
   $("facCharge").textContent = money(bill.fac);
   $("dutyCharge").textContent = money(bill.electricityDuty);
+  $("dutyRate").textContent = `(${bill.electricityDutyPercent ?? 0}%)`;
   $("wheelingCharge").textContent = money(bill.wheelingCharges);
+  $("taxCharge").textContent = money(bill.taxOnSale);
+  $("taxRate").textContent = `(@${Math.round((bill.taxOnSalePerKwh ?? 0) * 100)}ps/u)`;
   $("fixedCharge").textContent = money(bill.fixedCharges);
   $("otherCharge").textContent = money(bill.otherCharges);
   renderSavingsBadge(summary);

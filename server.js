@@ -26,6 +26,7 @@ const WalletTxn = require("./models/WalletTxn");
 const PaymentRequest = require("./models/PaymentRequest");
 const ReadingChangeRequest = require("./models/ReadingChangeRequest");
 const Notification = require("./models/Notification");
+const MsebBillHistory = require("./models/MsebBillHistory");
 const fs = require("fs");
 const { auth, adminOnly } = require("./middleware/auth");
 
@@ -36,7 +37,7 @@ if (!JWT_SECRET) throw new Error("JWT_SECRET must be configured in the environme
 
 // Image uploads (base64 in JSON) get a bigger body limit, but only on these authenticated routes (see uploadJson).
 const UPLOAD_ROUTES = new Set(["/api/user/payments", "/api/admin/payment-qr"]);
-const UPLOAD_ROUTE_PATTERNS = [/^\/api\/user\/meters\/[^/]+\/mseb-reading$/, /^\/api\/user\/meters\/[^/]+\/mseb-reading\/change-request$/];
+const UPLOAD_ROUTE_PATTERNS = [/^\/api\/user\/meters\/[^/]+\/mseb-reading$/, /^\/api\/user\/meters\/[^/]+\/mseb-reading\/change-request$/, /^\/api\/user\/meters\/[^/]+\/mseb-history$/];
 const uploadJson = express.json({ limit: "5mb" });
 const smallJson = express.json();
 app.use((req, res, next) => ((UPLOAD_ROUTES.has(req.path) || UPLOAD_ROUTE_PATTERNS.some(p => p.test(req.path))) && req.method === "POST" ? next() : smallJson(req, res, next)));
@@ -186,17 +187,21 @@ function calculateBill(kwh, slabs, settings = {}, includeCycleCharges = false) {
 
   const fac = kwh * Number(settings.facPerKwh || 0);
   const wheeling = kwh * Number(settings.wheelingChargePerKwh || 0);
+  const taxOnSale = kwh * Number(settings.taxOnSalePerKwh || 0);
   const duty = (energyCharges + fac) * Number(settings.electricityDutyPercent || 0) / 100;
   const fixed = includeCycleCharges ? Number(settings.fixedCharge || 0) : 0;
   const other = includeCycleCharges ? Number(settings.otherCharges || 0) : 0;
-  const total = energyCharges + fac + wheeling + duty + fixed + other;
+  const total = energyCharges + fac + wheeling + taxOnSale + duty + fixed + other;
   return {
     kwh: Number(kwh.toFixed(4)),
     cost: Number(total.toFixed(2)),
     energyCharges: Number(energyCharges.toFixed(2)),
     fac: Number(fac.toFixed(2)),
     electricityDuty: Number(duty.toFixed(2)),
+    electricityDutyPercent: Number(settings.electricityDutyPercent || 0),
     wheelingCharges: Number(wheeling.toFixed(2)),
+    taxOnSale: Number(taxOnSale.toFixed(2)),
+    taxOnSalePerKwh: Number(settings.taxOnSalePerKwh || 0),
     fixedCharges: Number(fixed.toFixed(2)),
     otherCharges: Number(other.toFixed(2)),
     currentSlab: currentSlab ? {
@@ -221,7 +226,8 @@ function billDifference(currentKwh, previousKwh, periodKwh, slabs, settings) {
     energyCharges: subtract("energyCharges"),
     fac: subtract("fac"),
     electricityDuty: subtract("electricityDuty"),
-    wheelingCharges: subtract("wheelingCharges")
+    wheelingCharges: subtract("wheelingCharges"),
+    taxOnSale: subtract("taxOnSale")
   };
 }
 
@@ -234,8 +240,9 @@ function liveHourlyCost(power, cumulativeKwh, slabs, settings) {
   const energyCharge = usageKwh * Number((slab || slabs[0]).ratePerKwh);
   const fac = usageKwh * Number(settings.facPerKwh || 0);
   const wheeling = usageKwh * Number(settings.wheelingChargePerKwh || 0);
+  const taxOnSale = usageKwh * Number(settings.taxOnSalePerKwh || 0);
   const duty = (energyCharge + fac) * Number(settings.electricityDutyPercent || 0) / 100;
-  return Number((energyCharge + fac + wheeling + duty).toFixed(2));
+  return Number((energyCharge + fac + wheeling + taxOnSale + duty).toFixed(2));
 }
 
 // ---------- One-time passcodes (stored in the Otp collection) ----------
@@ -1093,11 +1100,11 @@ async function adminMeter(req, res) {
 }
 
 // The signed-in user's own meter, only when the admin allowed user configuration.
-async function ownMeter(req, res, needs = null) {
+async function ownMeter(req, res, needs = null, deniedMessage = "Your administrator has not allowed you to configure this meter.") {
   const meter = await Meter.findOne({ meterId: req.params.meterId.toUpperCase(), userId: req.user._id }).lean();
   if (!meter) { res.status(404).json({ message: "Meter is not assigned to your account" }); return null; }
   if (needs && !meter[needs]) {
-    res.status(403).json({ message: "Your administrator has not allowed you to configure this meter." });
+    res.status(403).json({ message: deniedMessage });
     return null;
   }
   return meter;
@@ -1123,11 +1130,15 @@ app.post("/api/admin/meters/:meterId/wifi/connect", auth, adminOnly, async (req,
 });
 
 app.put("/api/admin/meters/:meterId/permissions", auth, adminOnly, async (req, res) => {
-  const { userConfigAllowed } = req.body;
+  const { userConfigAllowed, msebDataAllowed } = req.body;
   const updates = {};
   if (userConfigAllowed !== undefined) {
     if (typeof userConfigAllowed !== "boolean") return res.status(400).json({ message: "userConfigAllowed must be true or false" });
     updates.userConfigAllowed = userConfigAllowed;
+  }
+  if (msebDataAllowed !== undefined) {
+    if (typeof msebDataAllowed !== "boolean") return res.status(400).json({ message: "msebDataAllowed must be true or false" });
+    updates.msebDataAllowed = msebDataAllowed;
   }
   const meter = await Meter.findOneAndUpdate({ meterId: req.params.meterId.toUpperCase() }, { $set: updates }, { new: true }).populate("userId", "name email");
   if (!meter) return res.status(404).json({ message: "Meter not found" });
@@ -1406,7 +1417,7 @@ app.get("/api/user/meters/:meterId/mseb-reading", auth, async (req, res) => {
 app.post("/api/user/meters/:meterId/mseb-reading", auth, uploadJson, async (req, res) => {
   let file = "";
   try {
-    const meter = await ownMeter(req, res);
+    const meter = await ownMeter(req, res, "msebDataAllowed", "Your administrator has not allowed you to add MSEB data for this meter.");
     if (!meter) return;
     if (meter.msebInitialReading !== null) return res.status(409).json({ message: "A reading was already recorded for this meter. Submit a change request instead." });
     const reading = parseReading(req.body.reading);
@@ -1426,7 +1437,7 @@ app.post("/api/user/meters/:meterId/mseb-reading", auth, uploadJson, async (req,
 app.post("/api/user/meters/:meterId/mseb-reading/change-request", auth, uploadJson, async (req, res) => {
   let file = "";
   try {
-    const meter = await ownMeter(req, res);
+    const meter = await ownMeter(req, res, "msebDataAllowed", "Your administrator has not allowed you to add MSEB data for this meter.");
     if (!meter) return;
     if (meter.msebInitialReading === null) return res.status(400).json({ message: "Submit the initial reading first." });
     const reading = parseReading(req.body.reading);
@@ -1506,6 +1517,91 @@ app.get("/api/user/meters/:meterId/mseb-reading/photo", auth, async (req, res) =
   if (!meter) return;
   if (!meter.msebInitialReadingPhoto) return res.status(404).json({ message: "No photo uploaded" });
   sendImage(res, meter.msebInitialReadingPhoto);
+});
+
+// --- MSEB bill history (previous months, for comparison against this system's own meter) ---
+function monthBounds(month) {
+  const [year, mon] = month.split("-").map(Number);
+  const start = new Date(`${year}-${String(mon).padStart(2, "0")}-01T00:00:00+05:30`);
+  const end = new Date(mon === 12 ? `${year + 1}-01-01T00:00:00+05:30` : `${year}-${String(mon + 1).padStart(2, "0")}-01T00:00:00+05:30`);
+  return { start, end };
+}
+
+function historyView(h) {
+  return {
+    _id: h._id, month: h.month, msebReadingKwh: h.msebReadingKwh, msebBillAmount: h.msebBillAmount,
+    status: h.status, adminNote: h.adminNote, createdAt: h.createdAt, reviewedAt: h.reviewedAt
+  };
+}
+
+app.get("/api/user/meters/:meterId/mseb-history", auth, async (req, res) => {
+  const meter = await ownMeter(req, res);
+  if (!meter) return;
+  const rows = await MsebBillHistory.find({ meterId: meter.meterId, userId: req.user._id }).sort({ month: -1 }).limit(12).lean();
+  res.json(rows.map(historyView));
+});
+
+app.post("/api/user/meters/:meterId/mseb-history", auth, uploadJson, async (req, res) => {
+  let file = "";
+  try {
+    const meter = await ownMeter(req, res, "msebDataAllowed", "Your administrator has not allowed you to add MSEB data for this meter.");
+    if (!meter) return;
+    const month = String(req.body.month || "");
+    if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ message: "Choose a valid month." });
+    const reading = parseReading(req.body.msebReadingKwh);
+    if (reading === null) return res.status(400).json({ message: "Enter the MSEB meter reading for that month (0 to 999999 kWh)." });
+    const billAmount = Number(req.body.msebBillAmount);
+    if (!Number.isFinite(billAmount) || billAmount < 0 || billAmount > 9999999) return res.status(400).json({ message: "Enter a valid MSEB bill amount." });
+    file = await saveImage(req.body.photo, crypto.randomBytes(12).toString("hex"));
+    let entry;
+    try {
+      entry = await MsebBillHistory.create({ meterId: meter.meterId, userId: req.user._id, month, msebReadingKwh: reading, msebBillAmount: billAmount, photoFile: file });
+    } catch (error) {
+      await removeUpload(file);
+      if (error.code === 11000) return res.status(409).json({ message: "A submission for that month is already pending or approved." });
+      throw error;
+    }
+    await logActivity(req.user, "mseb-history-submitted", meter.meterId, `${month}: ${reading} kWh, ₹${billAmount}`);
+    res.status(201).json({ message: "Submitted for admin approval.", entry: historyView(entry) });
+    User.find({ role: "Admin", active: true }).select("name email").lean().then(admins => Promise.all(admins.map(admin =>
+      notifyUser(admin, "MSEB bill history waiting for approval", [`${req.user.name} (${req.user.email}) submitted a ${month} MSEB record for ${meter.meterName || meter.meterId}: ${reading} kWh, ₹${billAmount}. Open MSEB readings in the admin dashboard to review.`], "mseb-history pending")))).catch(() => {});
+  } catch (error) {
+    await removeUpload(file);
+    if (error.status) return res.status(error.status).json({ message: error.message });
+    console.error("MSEB history submit failed:", error);
+    res.status(500).json({ message: "Could not submit that month's record." });
+  }
+});
+
+app.get("/api/user/meters/:meterId/mseb-history/:id/photo", auth, async (req, res) => {
+  const meter = await ownMeter(req, res);
+  if (!meter) return;
+  if (!OBJECT_ID.test(req.params.id)) return res.status(404).json({ message: "Not found" });
+  const entry = await MsebBillHistory.findOne({ _id: req.params.id, meterId: meter.meterId, userId: req.user._id }).lean();
+  if (!entry) return res.status(404).json({ message: "Not found" });
+  sendImage(res, entry.photoFile);
+});
+
+// Approved MSEB months next to this system's own reading for the same calendar month.
+app.get("/api/user/meters/:meterId/mseb-comparison", auth, async (req, res) => {
+  const meter = await ownMeter(req, res);
+  if (!meter) return;
+  const [approved, slabs, settings] = await Promise.all([
+    MsebBillHistory.find({ meterId: meter.meterId, userId: req.user._id, status: "approved" }).sort({ month: 1 }).lean(),
+    TariffSlab.find().sort({ minKwh: 1 }).lean(),
+    BillingSettings.findOne({ key: "default" }).lean()
+  ]);
+  const months = await Promise.all(approved.map(async entry => {
+    const { start, end } = monthBounds(entry.month);
+    const ourKwh = await periodConsumption(meter.meterId, start, end);
+    const ourBill = calculateBill(ourKwh, slabs, settings || {}, true);
+    return {
+      month: entry.month,
+      msebKwh: entry.msebReadingKwh, msebCost: entry.msebBillAmount,
+      ourKwh: ourKwh == null ? null : Number(ourKwh.toFixed(3)), ourCost: ourBill.cost
+    };
+  }));
+  res.json({ months });
 });
 
 app.get("/api/user/meters/:meterId/wifi", auth, async (req, res) => {
@@ -1948,7 +2044,7 @@ app.get("/api/admin/settings", auth, adminOnly, async (req, res) => {
 
 app.put("/api/admin/settings", auth, adminOnly, async (req, res) => {
   const numericFields = [
-    "fixedCharge", "facPerKwh", "electricityDutyPercent", "wheelingChargePerKwh", "otherCharges",
+    "fixedCharge", "facPerKwh", "electricityDutyPercent", "wheelingChargePerKwh", "taxOnSalePerKwh", "otherCharges",
     "dailyCostLimit", "monthlyCostLimit", "dailyEnergyLimit", "consumptionTargetKwh",
     "minVoltage", "maxVoltage", "maxCurrent", "maxPower", "standbyPowerThreshold", "minPowerFactor"
   ];
@@ -2361,6 +2457,59 @@ app.get("/api/admin/mseb-readings/:meterId/photo", auth, adminOnly, async (req, 
   const meter = await Meter.findOne({ meterId: req.params.meterId.toUpperCase() }).lean();
   if (!meter?.msebInitialReadingPhoto) return res.status(404).json({ message: "No photo uploaded" });
   sendImage(res, meter.msebInitialReadingPhoto);
+});
+
+// --- admin: MSEB bill history (previous months) ---
+app.get("/api/admin/mseb-history", auth, adminOnly, async (req, res) => {
+  const filter = ["pending", "approved", "rejected"].includes(req.query.status) ? { status: req.query.status } : {};
+  const [rows, pending] = await Promise.all([
+    MsebBillHistory.find(filter).sort({ createdAt: -1 }).limit(200).populate("userId", "name email").lean(),
+    MsebBillHistory.countDocuments({ status: "pending" })
+  ]);
+  res.json({
+    pending,
+    entries: rows.map(h => ({ ...historyView(h), meterId: h.meterId, user: h.userId ? { name: h.userId.name, email: h.userId.email } : null, reviewedBy: h.reviewedBy }))
+  });
+});
+
+app.get("/api/admin/mseb-history/:id/photo", auth, adminOnly, async (req, res) => {
+  if (!OBJECT_ID.test(req.params.id)) return res.status(404).json({ message: "Not found" });
+  const entry = await MsebBillHistory.findById(req.params.id).lean();
+  if (!entry) return res.status(404).json({ message: "Not found" });
+  sendImage(res, entry.photoFile);
+});
+
+app.post("/api/admin/mseb-history/:id/approve", auth, adminOnly, async (req, res) => {
+  if (!OBJECT_ID.test(req.params.id)) return res.status(404).json({ message: "Entry not found" });
+  const entry = await MsebBillHistory.findOneAndUpdate(
+    { _id: req.params.id, status: "pending" },
+    { $set: { status: "approved", reviewedBy: req.user.email, reviewedAt: new Date(), adminNote: String(req.body.note || "").slice(0, 240) } },
+    { new: true }
+  );
+  if (!entry) return res.status(409).json({ message: "This entry was already reviewed." });
+  await logActivity(req.user, "mseb-history-approved", entry.meterId, `${entry.month}: ${entry.msebReadingKwh} kWh, ₹${entry.msebBillAmount}`);
+  const user = await User.findById(entry.userId).select("name email").lean();
+  if (user) {
+    notifyUser(user, "MSEB bill history approved", [`Your ${entry.month} MSEB record for ${entry.meterId} (${entry.msebReadingKwh} kWh, ₹${entry.msebBillAmount}) was approved and now appears in your comparison chart.`], "mseb-history approved");
+    notifyBell(user._id, "MSEB bill history approved", `${entry.month} for ${entry.meterId} is now on record.`, "mseb-history", entry.meterId);
+  }
+  res.json({ message: "Approved. It now appears in the user's comparison chart." });
+});
+
+app.post("/api/admin/mseb-history/:id/reject", auth, adminOnly, async (req, res) => {
+  if (!OBJECT_ID.test(req.params.id)) return res.status(404).json({ message: "Entry not found" });
+  const note = String(req.body.note || "").trim().slice(0, 240);
+  if (!note) return res.status(400).json({ message: "Give the user a reason for rejecting this entry." });
+  const entry = await MsebBillHistory.findOneAndUpdate({ _id: req.params.id, status: "pending" },
+    { $set: { status: "rejected", adminNote: note, reviewedBy: req.user.email, reviewedAt: new Date() } }, { new: true });
+  if (!entry) return res.status(409).json({ message: "This entry was already reviewed or does not exist." });
+  await logActivity(req.user, "mseb-history-rejected", entry.meterId, note);
+  const user = await User.findById(entry.userId).select("name email").lean();
+  if (user) {
+    notifyUser(user, "MSEB bill history not approved", [`Your ${entry.month} MSEB record for ${entry.meterId} could not be approved.`, `Reason: ${note}`, "You can submit that month again with a clear photo or contact your administrator."], "mseb-history rejected");
+    notifyBell(user._id, "MSEB bill history not approved", `${entry.month} for ${entry.meterId}: ${note}`, "mseb-history", entry.meterId);
+  }
+  res.json({ message: "Entry rejected and the user was notified." });
 });
 
 app.get("/api/admin/reading-requests", auth, adminOnly, async (req, res) => {

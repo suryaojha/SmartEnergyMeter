@@ -10,7 +10,7 @@ function openTab(tab) {
   if (tab === "wifi") loadWifiStatus();
   if (tab === "presence") loadPresence();
   if (tab === "payments") loadPayments();
-  if (tab === "msebReadings") { loadMsebReadings(); loadReadingRequests(); }
+  if (tab === "msebReadings") { loadMsebReadings(); loadReadingRequests(); loadMsebHistoryAdmin(); }
   if (tab === "subscriptions") loadSubscriptions();
   if (tab === "readings") loadReadings();
   if (tab === "smtp") loadSmtpSettings();
@@ -103,6 +103,7 @@ function renderMeterList() {
       <div class="field" style="margin-top:10px"><label>Reading interval</label>
         <select data-frequency="${id}">${options.map(value => `<option value="${value}" ${value === freq ? "selected" : ""}>${value} sec</option>`).join("")}</select></div>
       <div class="perm-row"><div><b>User may configure meter</b><small>Rename, interval and Wi-Fi from their dashboard</small></div><label class="switch"><input type="checkbox" data-perm="userConfigAllowed" data-meter="${id}" ${meter.userConfigAllowed ? "checked" : ""}><i></i></label></div>
+      <div class="perm-row"><div><b>User may add MSEB data</b><small>Submit the old meter's reading/photo and bill history</small></div><label class="switch"><input type="checkbox" data-perm="msebDataAllowed" data-meter="${id}" ${meter.msebDataAllowed ? "checked" : ""}><i></i></label></div>
       <div class="meter-actions">
         <button class="btn small secondary" data-device-token="${id}">${meter.devicePaired ? "Rotate token" : "Pair device"}</button>
         <button class="btn small secondary" data-rename="${id}">Rename</button>
@@ -132,9 +133,13 @@ $("meterList").addEventListener("click", event => {
 });
 
 async function setPermission(meterId, field, value, input) {
+  const messages = {
+    userConfigAllowed: value ? "User can now configure this meter" : "User configuration locked",
+    msebDataAllowed: value ? "User can now add MSEB data" : "User can no longer add MSEB data"
+  };
   try {
     await API.request(`/api/admin/meters/${encodeURIComponent(meterId)}/permissions`, { method: "PUT", body: { [field]: value } });
-    toast(value ? "User can now configure this meter" : "User configuration locked");
+    toast(messages[field] || "Permission updated");
   } catch (e) {
     input.checked = !value;
     toast(e.message);
@@ -709,9 +714,13 @@ $("closeShot").addEventListener("click", () => $("shotDialog").close());
 /* ---------- MSEB readings (captured before the ESP32 goes online) ---------- */
 async function loadReadingPendingBadge() {
   try {
-    const { pending } = await API.request("/api/admin/reading-requests?status=pending");
-    $("readingPendingBadge").textContent = pending;
-    $("readingPendingBadge").classList.toggle("hidden", !pending);
+    const [{ pending: readingPending }, { pending: historyPending }] = await Promise.all([
+      API.request("/api/admin/reading-requests?status=pending"),
+      API.request("/api/admin/mseb-history?status=pending")
+    ]);
+    const total = readingPending + historyPending;
+    $("readingPendingBadge").textContent = total;
+    $("readingPendingBadge").classList.toggle("hidden", !total);
   } catch {}
 }
 
@@ -777,6 +786,48 @@ $("readingReqTable").addEventListener("click", async event => {
       await loadReadingRequests();
     }
   } catch (e) { toast(e.message); await loadReadingRequests(); }
+});
+
+$("msebHistoryFilter").addEventListener("change", loadMsebHistoryAdmin);
+
+async function loadMsebHistoryAdmin() {
+  try {
+    const { entries, pending } = await API.request(`/api/admin/mseb-history?status=${encodeURIComponent($("msebHistoryFilter").value)}`);
+    $("msebHistoryAdminTable").innerHTML = entries.map(h => `<tr>
+      <td data-label="Submitted">${new Date(h.createdAt).toLocaleString()}</td>
+      <td data-label="Meter">${esc(h.meterId)}</td>
+      <td data-label="User">${esc(h.user?.name || "(deleted)")}<div class="status-text" style="margin:0">${esc(h.user?.email || "")}</div></td>
+      <td data-label="Month">${esc(h.month)}</td>
+      <td data-label="MSEB reading"><b>${h.msebReadingKwh} kWh</b></td>
+      <td data-label="MSEB bill"><b>${inr(h.msebBillAmount)}</b></td>
+      <td data-label="Status"><span class="pill ${h.status === "approved" ? "online" : h.status === "rejected" ? "offline" : "warn"}">${esc(h.status.toUpperCase())}</span>${h.adminNote ? `<div class="status-text" style="margin:0">${esc(h.adminNote)}</div>` : ""}</td>
+      <td data-label="Actions"><div class="actions" style="justify-content:flex-end">
+        <button class="btn small secondary" data-hist-shot="${esc(h._id)}">Photo</button>
+        ${h.status === "pending" ? `<button class="btn small success" data-hist-approve="${esc(h._id)}">Approve</button><button class="btn small danger" data-hist-reject="${esc(h._id)}">Reject</button>` : ""}
+      </div></td></tr>`).join("") || `<tr><td colspan="8" class="empty">No submissions here.</td></tr>`;
+  } catch (e) { toast(e.message); }
+  loadReadingPendingBadge();
+}
+
+$("msebHistoryAdminTable").addEventListener("click", async event => {
+  const shot = event.target.closest("[data-hist-shot]");
+  const approve = event.target.closest("[data-hist-approve]");
+  const reject = event.target.closest("[data-hist-reject]");
+  try {
+    if (shot) {
+      $("shotImg").src = await API.blobUrl(`/api/admin/mseb-history/${encodeURIComponent(shot.dataset.histShot)}/photo`);
+      $("shotDialog").showModal();
+    } else if (approve) {
+      approve.disabled = true;
+      toast((await API.request(`/api/admin/mseb-history/${encodeURIComponent(approve.dataset.histApprove)}/approve`, { method: "POST" })).message);
+      await loadMsebHistoryAdmin();
+    } else if (reject) {
+      const note = prompt("Reason for rejecting (shown to the user):");
+      if (!note) return;
+      toast((await API.request(`/api/admin/mseb-history/${encodeURIComponent(reject.dataset.histReject)}/reject`, { method: "POST", body: { note } })).message);
+      await loadMsebHistoryAdmin();
+    }
+  } catch (e) { toast(e.message); await loadMsebHistoryAdmin(); }
 });
 
 /* ---------- wallets, plans, payment details ---------- */

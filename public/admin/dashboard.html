@@ -143,6 +143,10 @@
         <div class="page-head" style="margin-top:20px"><div><h2 class="section-title" style="margin:0">Change requests</h2></div>
           <div class="filter-row"><select id="readingReqFilter" aria-label="Filter requests"><option value="pending">Waiting for approval</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="">All</option></select><button class="btn secondary" onclick="loadReadingRequests()">Refresh</button></div></div>
         <div class="panel"><div class="table-wrap"><table class="table stack"><thead><tr><th>Submitted</th><th>Meter</th><th>User</th><th>Requested reading</th><th>Status</th><th>Actions</th></tr></thead><tbody id="readingReqTable"></tbody></table></div></div>
+
+        <div class="page-head" style="margin-top:20px"><div><h2 class="section-title" style="margin:0">MSEB bill history (previous months)</h2></div>
+          <div class="filter-row"><select id="msebHistoryFilter" aria-label="Filter history"><option value="pending">Waiting for approval</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="">All</option></select><button class="btn secondary" onclick="loadMsebHistoryAdmin()">Refresh</button></div></div>
+        <div class="panel"><div class="table-wrap"><table class="table stack"><thead><tr><th>Submitted</th><th>Meter</th><th>User</th><th>Month</th><th>MSEB reading</th><th>MSEB bill</th><th>Status</th><th>Actions</th></tr></thead><tbody id="msebHistoryAdminTable"></tbody></table></div></div>
       </section>
 
       <section id="subscriptions" class="section">
@@ -231,10 +235,11 @@
           <h2 class="section-title" style="margin-top:0">Billing</h2>
           <div class="form-row">
             <div class="field"><label for="billingCycleStartDay">Cycle starts on day (1-28)</label><input id="billingCycleStartDay" type="number" min="1" max="28" required></div>
-            <div class="field"><label for="fixedCharge">Fixed charge (₹ / cycle)</label><input id="fixedCharge" type="number" min="0" step="0.01" data-setting></div>
-            <div class="field"><label for="facPerKwh">FAC (₹ / kWh)</label><input id="facPerKwh" type="number" min="0" step="0.01" data-setting></div>
-            <div class="field"><label for="electricityDutyPercent">Electricity duty (%)</label><input id="electricityDutyPercent" type="number" min="0" step="0.01" data-setting></div>
-            <div class="field"><label for="wheelingChargePerKwh">Wheeling (₹ / kWh)</label><input id="wheelingChargePerKwh" type="number" min="0" step="0.01" data-setting></div>
+            <div class="field"><label for="fixedCharge">FC &mdash; Fixed charge (₹ / cycle)</label><input id="fixedCharge" type="number" min="0" step="0.01" data-setting></div>
+            <div class="field"><label for="facPerKwh">Fuel Adjustment Charges (₹ / kWh)</label><input id="facPerKwh" type="number" min="0" step="0.01" data-setting></div>
+            <div class="field"><label for="electricityDutyPercent">ED &mdash; Electricity duty (%)</label><input id="electricityDutyPercent" type="number" min="0" step="0.01" data-setting></div>
+            <div class="field"><label for="wheelingChargePerKwh">Wheeling charges (₹ / kWh)</label><input id="wheelingChargePerKwh" type="number" min="0" step="0.01" data-setting></div>
+            <div class="field"><label for="taxOnSalePerKwh">Tax on sale (₹ / kWh)</label><input id="taxOnSalePerKwh" type="number" min="0" step="0.01" data-setting></div>
             <div class="field"><label for="otherCharges">Other charges (₹ / cycle)</label><input id="otherCharges" type="number" min="0" step="0.01" data-setting></div>
           </div>
           <h2 class="section-title">Targets and cost limits</h2>
