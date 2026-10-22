@@ -25,7 +25,7 @@ document.querySelectorAll(".navbtn").forEach(button => { button.onclick = () => 
   if (!currentUser) return;
   $("adminName").textContent = currentUser.name;
   fillReportHours();
-  await Promise.all([loadOverview(), loadUsers(), loadTariffs(), loadSettings()]);
+  await Promise.all([loadOverview(), loadUsers(), loadTariffs(), loadSettings(), loadFeatures()]);
   await loadMeters();
   const hash = location.hash.slice(1);
   if (hash && $(hash)?.classList.contains("section")) openTab(hash);
@@ -439,6 +439,27 @@ $("settingsForm").onsubmit = async event => {
     $("settingsMsg").textContent = "Settings saved.";
     toast("Settings saved");
   } catch (e) { $("settingsMsg").textContent = e.message; toast(e.message); }
+};
+
+/* ---------- in-app feature toggles ---------- */
+async function loadFeatures() {
+  try {
+    const f = await API.request("/api/admin/features");
+    $("featureNotifications").checked = f.notifications;
+    $("featureBillPdf").checked = f.billPdf;
+    $("featureSavingsTracker").checked = f.savingsTracker;
+  } catch (e) { toast(e.message); }
+}
+
+$("featuresForm").onsubmit = async event => {
+  event.preventDefault();
+  try {
+    const r = await API.request("/api/admin/features", { method: "PUT", body: {
+      notifications: $("featureNotifications").checked, billPdf: $("featureBillPdf").checked, savingsTracker: $("featureSavingsTracker").checked
+    } });
+    $("featuresMsg").textContent = r.message;
+    toast(r.message);
+  } catch (e) { $("featuresMsg").textContent = e.message; toast(e.message); }
 };
 
 /* ---------- report schedule ---------- */

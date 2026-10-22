@@ -25,6 +25,7 @@ const Plan = require("./models/Plan");
 const WalletTxn = require("./models/WalletTxn");
 const PaymentRequest = require("./models/PaymentRequest");
 const ReadingChangeRequest = require("./models/ReadingChangeRequest");
+const Notification = require("./models/Notification");
 const fs = require("fs");
 const { auth, adminOnly } = require("./middleware/auth");
 
@@ -247,6 +248,19 @@ async function getAppSettings() {
     { $setOnInsert: { key: "default" } },
     { new: true, upsert: true, setDefaultsOnInsert: true }
   ).lean();
+}
+
+// Creates an in-app notification (bell icon), independent of e-mail. Never throws: a failure here
+// must not break the e-mail/billing/subscription flow it is always called alongside.
+async function notifyBell(userId, title, body, kind = "", meterId = "") {
+  try {
+    if (!userId) return;
+    const settings = await getAppSettings();
+    if (settings.featureNotifications === false) return;
+    await Notification.create({ userId, title, body: String(body || "").slice(0, 400), kind, meterId });
+  } catch (error) {
+    console.error("Notification create failed:", error.message);
+  }
 }
 
 function hashOtp(userId, purpose, code) {
@@ -1434,6 +1448,59 @@ app.post("/api/user/meters/:meterId/mseb-reading/change-request", auth, uploadJs
   }
 });
 
+// --- feature toggles (admin-controlled, independent of any single feature's own data) ---
+app.get("/api/user/features", auth, async (req, res) => {
+  const settings = await getAppSettings();
+  res.json({
+    notifications: settings.featureNotifications !== false,
+    billPdf: settings.featureBillPdf !== false,
+    savingsTracker: settings.featureSavingsTracker !== false
+  });
+});
+
+app.get("/api/admin/features", auth, adminOnly, async (req, res) => {
+  const settings = await getAppSettings();
+  res.json({
+    notifications: settings.featureNotifications !== false,
+    billPdf: settings.featureBillPdf !== false,
+    savingsTracker: settings.featureSavingsTracker !== false
+  });
+});
+
+app.put("/api/admin/features", auth, adminOnly, async (req, res) => {
+  const updates = {};
+  for (const [key, field] of [["notifications", "featureNotifications"], ["billPdf", "featureBillPdf"], ["savingsTracker", "featureSavingsTracker"]]) {
+    if (typeof req.body[key] !== "boolean") return res.status(400).json({ message: `${key} must be true or false` });
+    updates[field] = req.body[key];
+  }
+  await AppSettings.updateOne({ key: "default" }, { $set: updates }, { upsert: true });
+  await logActivity(req.user, "feature-toggles", "", JSON.stringify(req.body));
+  res.json({ message: "Feature settings saved." });
+});
+
+// --- in-app notifications (bell icon) ---
+app.get("/api/user/notifications", auth, async (req, res) => {
+  const [notifications, unreadCount] = await Promise.all([
+    Notification.find({ userId: req.user._id }).sort({ createdAt: -1 }).limit(30).lean(),
+    Notification.countDocuments({ userId: req.user._id, read: false })
+  ]);
+  res.json({
+    unreadCount,
+    notifications: notifications.map(n => ({ _id: n._id, title: n.title, body: n.body, kind: n.kind, meterId: n.meterId, read: n.read, createdAt: n.createdAt }))
+  });
+});
+
+app.post("/api/user/notifications/:id/read", auth, async (req, res) => {
+  if (!OBJECT_ID.test(req.params.id)) return res.status(404).json({ message: "Not found" });
+  await Notification.updateOne({ _id: req.params.id, userId: req.user._id }, { $set: { read: true } });
+  res.json({ message: "Marked as read." });
+});
+
+app.post("/api/user/notifications/read-all", auth, async (req, res) => {
+  await Notification.updateMany({ userId: req.user._id, read: false }, { $set: { read: true } });
+  res.json({ message: "All notifications marked as read." });
+});
+
 app.get("/api/user/meters/:meterId/mseb-reading/photo", auth, async (req, res) => {
   const meter = await ownMeter(req, res);
   if (!meter) return;
@@ -2260,6 +2327,7 @@ app.post("/api/admin/payments/:id/approve", auth, adminOnly, async (req, res) =>
       console.error("Receipt e-mail failed:", error.message);
     }
   }
+  if (user) notifyBell(user._id, "Payment approved", `${money2(amountPaise)} credited to your wallet. Receipt ${payment.receiptNo}.`, "payment");
   checkSubscriptions(); // lets an expired auto-renew meter pick up the new balance immediately
   res.json({ message: emailed ? `Approved. ${money2(amountPaise)} credited and receipt e-mailed to ${user.email}.` : `Approved and credited, but the receipt e-mail could not be sent (see Activity log → E-mail deliveries).`, emailed });
 });
@@ -2273,7 +2341,10 @@ app.post("/api/admin/payments/:id/reject", auth, adminOnly, async (req, res) => 
   if (!payment) return res.status(409).json({ message: "This payment was already reviewed or does not exist." });
   await logActivity(req.user, "payment-rejected", payment.utr, note);
   const user = await User.findById(payment.userId).select("name email").lean();
-  if (user) notifyUser(user, "Payment not approved", [`Your payment of ${money2(payment.amountPaise)} (UTR ${payment.utr}) could not be approved.`, `Reason: ${note}`, "If you believe this is a mistake, submit the payment again with a clear screenshot or contact your administrator."], "payment rejected");
+  if (user) {
+    notifyUser(user, "Payment not approved", [`Your payment of ${money2(payment.amountPaise)} (UTR ${payment.utr}) could not be approved.`, `Reason: ${note}`, "If you believe this is a mistake, submit the payment again with a clear screenshot or contact your administrator."], "payment rejected");
+    notifyBell(user._id, "Payment not approved", `${money2(payment.amountPaise)} (UTR ${payment.utr}): ${note}`, "payment");
+  }
   res.json({ message: "Payment rejected and the user was notified." });
 });
 
@@ -2328,7 +2399,10 @@ app.post("/api/admin/reading-requests/:id/approve", auth, adminOnly, async (req,
   if (meter?.msebInitialReadingPhoto && meter.msebInitialReadingPhoto !== request.photoFile) await removeUpload(meter.msebInitialReadingPhoto);
   await logActivity(req.user, "mseb-reading-approved", request.meterId, `${request.reading} kWh`);
   const user = await User.findById(request.userId).select("name email").lean();
-  if (user) notifyUser(user, "Meter reading change approved", [`Your requested reading of ${request.reading} kWh for ${request.meterId} was approved and is now on record.`], "reading change approved");
+  if (user) {
+    notifyUser(user, "Meter reading change approved", [`Your requested reading of ${request.reading} kWh for ${request.meterId} was approved and is now on record.`], "reading change approved");
+    notifyBell(user._id, "Meter reading change approved", `${request.reading} kWh for ${request.meterId} is now on record.`, "reading", request.meterId);
+  }
   res.json({ message: "Approved. The meter's recorded reading was updated." });
 });
 
@@ -2341,7 +2415,10 @@ app.post("/api/admin/reading-requests/:id/reject", auth, adminOnly, async (req, 
   if (!request) return res.status(409).json({ message: "This request was already reviewed or does not exist." });
   await logActivity(req.user, "mseb-reading-rejected", request.meterId, note);
   const user = await User.findById(request.userId).select("name email").lean();
-  if (user) notifyUser(user, "Meter reading change not approved", [`Your requested reading change for ${request.meterId} (${request.reading} kWh) could not be approved.`, `Reason: ${note}`, "If you believe this is a mistake, submit the request again with a clear photo or contact your administrator."], "reading change rejected");
+  if (user) {
+    notifyUser(user, "Meter reading change not approved", [`Your requested reading change for ${request.meterId} (${request.reading} kWh) could not be approved.`, `Reason: ${note}`, "If you believe this is a mistake, submit the request again with a clear photo or contact your administrator."], "reading change rejected");
+    notifyBell(user._id, "Meter reading change not approved", `${request.reading} kWh for ${request.meterId}: ${note}`, "reading", request.meterId);
+  }
   res.json({ message: "Request rejected and the user was notified." });
 });
 
@@ -2450,13 +2527,17 @@ async function checkSubscriptions() {
         if (renewed) {
           await logActivity(user, "auto-renew", meter.meterId, `${plan.name} until ${istDateTime(renewed.end)}`);
           notifyUser(user, "Subscription auto-renewed", [`${label} was renewed automatically with ${plan.name} (${money2(plan.pricePaise)}). New end date: ${istDateTime(renewed.end)}. Wallet balance: ${money2(renewed.balance)}.`], "auto-renew");
+          notifyBell(user._id, "Subscription auto-renewed", `${label} renewed with ${plan.name} until ${istDateTime(renewed.end)}.`, "subscription", meter.meterId);
           continue;
         }
       }
       const result = await Meter.updateOne({ _id: meter._id, dataEnabled: { $ne: false } }, { $set: { dataEnabled: false, disabledReason: "subscription" } });
       if (!result.modifiedCount) continue;
       await logActivity(null, "subscription-expired", meter.meterId, "data collection disabled automatically");
-      if (user) notifyUser(user, "Subscription expired", [`The subscription for ${label} has ended, so data collection is switched off. The meter stays connected but no new readings are saved.`, meter.autoRenewPlanId ? "Auto-renew could not charge your wallet because the balance is too low." : "Recharge your wallet and renew the subscription from the Wallet tab to resume."], "subscription expired");
+      if (user) {
+        notifyUser(user, "Subscription expired", [`The subscription for ${label} has ended, so data collection is switched off. The meter stays connected but no new readings are saved.`, meter.autoRenewPlanId ? "Auto-renew could not charge your wallet because the balance is too low." : "Recharge your wallet and renew the subscription from the Wallet tab to resume."], "subscription expired");
+        notifyBell(user._id, "Subscription expired", `${label}'s subscription ended; data collection is paused. Recharge and renew from the Wallet tab.`, "subscription", meter.meterId);
+      }
     }
     const soon = await Meter.find({ subscriptionEnd: { $gt: now, $lte: new Date(now.getTime() + 3 * 86400000) }, userId: { $ne: null }, dataEnabled: { $ne: false } }).populate("userId", "name email active").lean();
     for (const meter of soon) {
@@ -2464,6 +2545,7 @@ async function checkSubscriptions() {
       if (meter.expiryReminderFor === key || !meter.userId?.active) continue;
       await Meter.updateOne({ _id: meter._id }, { $set: { expiryReminderFor: key } });
       notifyUser(meter.userId, "Subscription ending soon", [`The subscription for ${meter.meterName || meter.meterId} ends on ${istDateTime(meter.subscriptionEnd)}. Keep enough balance in your wallet and renew it from the Wallet tab so your readings keep being saved.`], "subscription reminder");
+      notifyBell(meter.userId._id, "Subscription ending soon", `${meter.meterName || meter.meterId} ends on ${istDateTime(meter.subscriptionEnd)}.`, "subscription", meter.meterId);
     }
   } catch (error) {
     console.error("Subscription check failed:", error);

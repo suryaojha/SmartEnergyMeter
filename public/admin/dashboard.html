@@ -256,6 +256,15 @@
           <div class="perm-row" style="margin-top:14px"><div><b>Enable alerts</b><small>Show alert banners to users and in reports</small></div><label class="switch"><input id="alertsEnabled" type="checkbox"><i></i></label></div>
           <div class="form-actions"><button class="btn" type="submit">Save settings</button></div><p id="settingsMsg" class="status-text"></p>
         </form>
+
+        <form id="featuresForm" class="panel">
+          <h2 class="section-title" style="margin-top:0">In-app features</h2>
+          <p class="muted" style="margin-top:0">Turn these on or off for every user. No e-mail or SMS is involved in any of them.</p>
+          <div class="perm-row"><div><b>Notification bell</b><small>In-dashboard alerts for subscriptions, payments and reading requests</small></div><label class="switch"><input id="featureNotifications" type="checkbox"><i></i></label></div>
+          <div class="perm-row"><div><b>Downloadable bill (PDF)</b><small>Lets users print/save their current bill breakdown</small></div><label class="switch"><input id="featureBillPdf" type="checkbox"><i></i></label></div>
+          <div class="perm-row"><div><b>Savings tracker</b><small>Highlights how this billing period compares with the last one</small></div><label class="switch"><input id="featureSavingsTracker" type="checkbox"><i></i></label></div>
+          <div class="form-actions" style="margin-top:14px"><button class="btn" type="submit">Save feature settings</button></div><p id="featuresMsg" class="status-text"></p>
+        </form>
       </section>
 
       <section id="smtp" class="section">

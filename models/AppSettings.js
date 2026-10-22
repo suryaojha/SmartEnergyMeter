@@ -12,7 +12,11 @@ const appSettingsSchema = new mongoose.Schema({
   payeeName: { type: String, default: "", trim: true },
   payInstructions: { type: String, default: "", maxlength: 400 },
   minRechargePaise: { type: Number, default: 1000 },
-  qrFile: { type: String, default: "" }                // admin-uploaded static QR image
+  qrFile: { type: String, default: "" },                // admin-uploaded static QR image
+  // In-app feature toggles (undefined/missing on older documents is treated as "on" everywhere it's read)
+  featureNotifications: { type: Boolean, default: true },
+  featureBillPdf: { type: Boolean, default: true },
+  featureSavingsTracker: { type: Boolean, default: true }
 }, { timestamps: true });
 
 module.exports = mongoose.model("AppSettings", appSettingsSchema);

@@ -11,7 +11,7 @@
 <body>
   <header class="topbar">
     <div class="brand">⚡ Energy <span>Meter</span></div>
-    <div class="userbox"><span id="userName"></span><button id="themeBtn" class="icon-btn" aria-label="Toggle theme">◐</button><button class="btn small secondary" onclick="logout()">Logout</button></div>
+    <div class="userbox"><span id="userName"></span><button id="notifBtn" class="icon-btn hidden" aria-label="Notifications">🔔<span id="notifBadge" class="pill warn hidden" style="margin-left:2px">0</span></button><button id="themeBtn" class="icon-btn" aria-label="Toggle theme">◐</button><button class="btn small secondary" onclick="logout()">Logout</button></div>
   </header>
   <main class="user-main">
     <div class="page-head">
@@ -34,7 +34,7 @@
       <div class="grid cards">
         <div class="card cost-primary"><div class="label">Running cost / hour</div><div class="metric" id="costPerHour">--</div><div id="avgCostPerHour" class="status-text">Today's average: --</div></div>
         <div class="card"><div class="label">Today's cost</div><div class="metric" id="todayCost">--</div><div id="dayCostCompare" class="status-text">Yesterday: --</div></div>
-        <div class="card"><div class="label">This billing period</div><div class="metric" id="monthCost">--</div><div id="monthCostCompare" class="status-text">Previous: --</div><div id="calendarMonthCompare" class="status-text"></div></div>
+        <div class="card"><div class="label">This billing period</div><div class="metric" id="monthCost">--</div><div id="monthCostCompare" class="status-text">Previous: --</div><div id="calendarMonthCompare" class="status-text"></div><div id="savingsBadge" class="pill hidden" style="margin-top:6px"></div></div>
         <div class="card"><div class="label">Expected period-end bill</div><div class="metric" id="expectedBill">--</div><div id="billingPeriod" class="status-text">--</div></div>
       </div>
       <div class="grid two">
@@ -63,7 +63,7 @@
       </div>
 
       <div class="panel">
-        <div class="toolbar" style="margin:0"><b>Bill estimate</b><span id="billTotal" class="metric compact">--</span></div>
+        <div class="toolbar" style="margin:0"><b>Bill estimate</b><div style="display:flex;align-items:center;gap:10px"><button id="billPdfBtn" class="btn small secondary hidden" type="button">⬇ Download bill (PDF)</button><span id="billTotal" class="metric compact">--</span></div></div>
         <div class="grid three billing-breakdown">
           <div>Energy charges <b id="energyCharges">--</b></div><div>FAC <b id="facCharge">--</b></div>
           <div>Electricity duty <b id="dutyCharge">--</b></div><div>Wheeling <b id="wheelingCharge">--</b></div>
@@ -257,6 +257,11 @@
   <dialog id="alertDialog" aria-labelledby="alertDialogTitle">
     <div class="dialog-head"><h2 id="alertDialogTitle">Energy alert</h2><button id="closeAlert" class="btn small secondary" type="button">Close</button></div>
     <div id="alertDialogContent" class="alert-list"></div>
+  </dialog>
+  <dialog id="notifDialog" aria-labelledby="notifDialogTitle">
+    <div class="dialog-head"><h2 id="notifDialogTitle">Notifications</h2><button id="closeNotif" class="btn small secondary" type="button">Close</button></div>
+    <div class="actions" style="margin-bottom:8px"><button id="markAllRead" class="btn small secondary" type="button">Mark all as read</button></div>
+    <div id="notifList" class="alert-list"></div>
   </dialog>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>

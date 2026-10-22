@@ -1,4 +1,6 @@
 let user, meters = [], charts = {}, currentMeter, refreshErrorShown = false, configFilledFor = null;
+let features = { notifications: true, billPdf: true, savingsTracker: true };
+let lastConsumptionData = null;
 
 function openTab(tab) {
   document.querySelectorAll(".user-navbtn").forEach(item => item.classList.toggle("active", item.dataset.tab === tab));
@@ -16,11 +18,58 @@ document.querySelectorAll(".user-navbtn").forEach(button => button.addEventListe
   user = await requireRole("User");
   if (!user) return;
   $("userName").textContent = user.name;
+  await loadFeatures();
   await loadMeters();
   setInterval(() => { if (!document.hidden) refreshLive(); }, 3000);
   setInterval(() => { if (!document.hidden) loadConsumption(); }, 30000);
   setInterval(() => { if (!document.hidden && $("meter").classList.contains("active")) loadWifi(); }, 5000);
+  if (features.notifications) {
+    loadNotifications();
+    setInterval(() => { if (!document.hidden) loadNotifications(); }, 20000);
+  }
 })();
+
+/* ---------- feature toggles ---------- */
+async function loadFeatures() {
+  try {
+    features = await API.request("/api/user/features");
+  } catch { /* keep defaults (all on) so the app still works if this call fails */ }
+  $("notifBtn").classList.toggle("hidden", !features.notifications);
+  $("billPdfBtn").classList.toggle("hidden", !features.billPdf);
+}
+
+/* ---------- notifications ---------- */
+function notifHtml(n) {
+  return `<div class="alert-item ${n.read ? "" : "alert-high"}" data-notif="${esc(n._id)}" style="cursor:pointer"><b>${esc(n.title)}</b><span>${esc(n.body)}</span><span class="status-text" style="margin:0">${new Date(n.createdAt).toLocaleString()}</span></div>`;
+}
+
+async function loadNotifications() {
+  try {
+    const r = await API.request("/api/user/notifications");
+    $("notifBadge").textContent = r.unreadCount;
+    $("notifBadge").classList.toggle("hidden", !r.unreadCount);
+    $("notifList").innerHTML = r.notifications.map(notifHtml).join("") || `<div class="status-text">No notifications yet.</div>`;
+  } catch (e) { /* silent: do not interrupt the dashboard for a notification fetch failure */ }
+}
+
+$("notifBtn").addEventListener("click", async () => { await loadNotifications(); $("notifDialog").showModal(); });
+$("closeNotif").addEventListener("click", () => $("notifDialog").close());
+
+$("notifList").addEventListener("click", async event => {
+  const item = event.target.closest("[data-notif]");
+  if (!item) return;
+  try {
+    await API.request(`/api/user/notifications/${encodeURIComponent(item.dataset.notif)}/read`, { method: "POST" });
+    await loadNotifications();
+  } catch { /* non-critical */ }
+});
+
+$("markAllRead").addEventListener("click", async () => {
+  try {
+    await API.request("/api/user/notifications/read-all", { method: "POST" });
+    await loadNotifications();
+  } catch (e) { toast(e.message); }
+});
 
 function comparison(current, previous, label) {
   if (current == null || previous == null) return `${label}: -- (insufficient readings)`;
@@ -250,6 +299,60 @@ async function loadAssignedConfig() {
   } catch (e) { toast(e.message); }
 }
 
+/* ---------- savings tracker ---------- */
+function renderSavingsBadge(summary) {
+  const badge = $("savingsBadge");
+  const current = summary.monthBill.cost, previous = summary.previousMonthBill.cost;
+  if (!features.savingsTracker || current == null || previous == null) { badge.classList.add("hidden"); return; }
+  const diff = previous - current;
+  const percent = previous === 0 ? null : Math.abs(diff / previous * 100).toFixed(1);
+  badge.classList.remove("hidden");
+  if (Math.abs(diff) < 0.01) {
+    badge.className = "pill off";
+    badge.textContent = "Same as last period";
+  } else if (diff > 0) {
+    badge.className = "pill online";
+    badge.textContent = `▼ Saved ${inr(diff)}${percent ? ` (${percent}%)` : ""} vs last period`;
+  } else {
+    badge.className = "pill offline";
+    badge.textContent = `▲ ${inr(Math.abs(diff))}${percent ? ` (${percent}%)` : ""} more than last period`;
+  }
+}
+
+/* ---------- bill PDF ---------- */
+$("billPdfBtn").addEventListener("click", () => {
+  if (!lastConsumptionData) return;
+  const { meter, summary, slabs } = lastConsumptionData;
+  const bill = summary.monthBill;
+  const period = summary.billingPeriod ? `${new Date(summary.billingPeriod.start).toLocaleDateString()} – ${new Date(summary.billingPeriod.end).toLocaleDateString()}` : "--";
+  const row = (label, value) => `<tr><td>${esc(label)}</td><td style="text-align:right">${esc(value)}</td></tr>`;
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Bill — ${esc(meter.meterName || meter.meterId)}</title>
+    <style>body{font-family:Arial,sans-serif;color:#172033;padding:32px;max-width:640px;margin:auto}h1{font-size:20px;margin:0 0 4px}
+    table{width:100%;border-collapse:collapse;margin-top:16px}td{padding:8px 4px;border-bottom:1px solid #e2e8f0}
+    tr.total td{font-weight:800;border-top:2px solid #172033;border-bottom:none}.muted{color:#64748b;font-size:13px}
+    @media print{button{display:none}}</style></head><body>
+    <h1>Smart Energy Meter — Bill estimate</h1>
+    <p class="muted">Meter: ${esc(meter.meterName || meter.meterId)} (${esc(meter.meterId)}) · Billing period ${esc(period)}</p>
+    <table>
+      ${row("Units consumed", `${display(bill.kwh, " kWh", 3)}`)}
+      ${bill.currentSlab ? row("Tariff slab", `${esc(bill.currentSlab.name)} · ₹${bill.currentSlab.ratePerKwh}/kWh`) : ""}
+      ${row("Energy charges", inr(bill.energyCharges))}
+      ${row("FAC", inr(bill.fac))}
+      ${row("Electricity duty", inr(bill.electricityDuty))}
+      ${row("Wheeling charges", inr(bill.wheelingCharges))}
+      ${row("Fixed charges", inr(bill.fixedCharges))}
+      ${row("Other charges", inr(bill.otherCharges))}
+      <tr class="total">${row("Total (estimated)", inr(bill.cost)).replace(/<tr>|<\/tr>/g, "")}</tr>
+    </table>
+    <p class="muted">Estimated from the tariff configured by your administrator; this is not an official MSEB bill. Generated ${new Date().toLocaleString()}.</p>
+    <button class="btn" onclick="window.print()" style="margin-top:16px;padding:10px 18px;border-radius:8px;border:none;background:#2563eb;color:#fff;cursor:pointer">Print / Save as PDF</button>
+    </body></html>`;
+  const win = window.open("", "_blank");
+  if (!win) { toast("Allow pop-ups to download the bill."); return; }
+  win.document.write(html);
+  win.document.close();
+});
+
 /* ---------- consumption / insights ---------- */
 async function loadConsumption() {
   const meterId = $("meterSelect").value;
@@ -266,6 +369,7 @@ $("csvBtn").onclick = async () => {
 };
 
 function renderAnalytics(data) {
+  lastConsumptionData = data;
   const { summary, slabs, settings } = data;
   $("costPerHour").textContent = money(summary.costPerHour);
   const avg = money(summary.todayAverageCostPerHour);
@@ -302,6 +406,7 @@ function renderAnalytics(data) {
   $("wheelingCharge").textContent = money(bill.wheelingCharges);
   $("fixedCharge").textContent = money(bill.fixedCharges);
   $("otherCharge").textContent = money(bill.otherCharges);
+  renderSavingsBadge(summary);
   renderAlerts(data.alerts || [], data.meter.meterId);
 
   const suggestions = data.suggestions || [];
