@@ -366,9 +366,10 @@ async function loadConsumption() {
     $("peakPowerAt").textContent = summary.peakPower ? new Date(summary.peakPower.at).toLocaleString() : "No power samples";
     $("billTotal").textContent = money(summary.monthBill.cost);
     $("energyCharges").textContent = money(summary.monthBill.energyCharges);
-    $("facCharge").textContent = money(summary.monthBill.fac);
+    $("ovFacCharge").textContent = money(summary.monthBill.fac);
     $("dutyCharge").textContent = money(summary.monthBill.electricityDuty);
     $("wheelingCharge").textContent = money(summary.monthBill.wheelingCharges);
+    $("ovTaxOnSale").textContent = money(summary.monthBill.taxOnSale);
     $("fixedCharge").textContent = money(summary.monthBill.fixedCharges);
     $("otherCharge").textContent = money(summary.monthBill.otherCharges);
     renderChart("hourlyChart", "bar", data.hourly.map(r => `${r.hour}:00`), data.hourly.map(r => r.kwh));

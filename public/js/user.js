@@ -347,7 +347,7 @@ async function loadAssignedConfig() {
     const lim = (v, unit) => v == null ? "not set" : `${v} ${unit}`;
     $("billingKv").innerHTML = [
       row("Billing cycle starts", `day ${b.billingCycleStartDay ?? 1}`), row("FC &mdash; Fixed charge", `₹${b.fixedCharge ?? 0} / cycle`),
-      row("Fuel Adjustment Charges", `₹${b.facPerKwh ?? 0} / kWh`), row("ED &mdash; Electricity duty", `${b.electricityDutyPercent ?? 0}%`),
+      row("Fuel Adjustment Charges", `₹${b.facCharge ?? 0} / cycle`), row("ED &mdash; Electricity duty", `${b.electricityDutyPercent ?? 0}%`),
       row("Wheeling charges", `₹${b.wheelingChargePerKwh ?? 0} / kWh`), row("Tax on sale", `@${Math.round((b.taxOnSalePerKwh ?? 0) * 100)}ps/u`),
       row("Other charges", `₹${b.otherCharges ?? 0} / cycle`),
       row("Daily cost limit", lim(b.dailyCostLimit, "₹")), row("Monthly budget", lim(b.monthlyCostLimit, "₹")),
@@ -392,7 +392,7 @@ $("billPdfBtn").addEventListener("click", () => {
   const bill = summary.monthBill;
   const period = summary.billingPeriod ? `${new Date(summary.billingPeriod.start).toLocaleDateString()} – ${new Date(summary.billingPeriod.end).toLocaleDateString()}` : "--";
   const line = (code, label, rate, value, big) => `<tr class="${big ? "total" : ""}"><td><span class="code">${esc(code)}</span>${esc(label)}${rate ? `<span class="rate">${esc(rate)}</span>` : ""}</td><td class="amt">${esc(value)}</td></tr>`;
-  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Bill — ${esc(meter.meterName || meter.meterId)}</title>
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Bill — ${esc(meter.meterName || meter.meterId)}</title>
     <style>
       *{box-sizing:border-box} body{font-family:'Segoe UI',Arial,sans-serif;color:#172033;background:#eef1ee;margin:0;padding:36px 16px}
       .sheet{max-width:640px;margin:auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,.08)}
@@ -411,6 +411,14 @@ $("billPdfBtn").addEventListener("click", () => {
       tr.total .amt{color:#c9801a}
       .foot{padding:18px 32px 28px;color:#8a93a3;font-size:12px;line-height:1.6}
       .printBtn{display:block;width:calc(100% - 64px);margin:0 32px 28px;padding:14px;border-radius:10px;border:none;background:#2563eb;color:#fff;font-size:15px;font-weight:700;cursor:pointer}
+      @media (max-width:480px){
+        body{padding:16px 8px}
+        .head{padding:22px 18px}
+        .meta{padding:16px 18px;flex-direction:column;gap:10px}
+        td{padding:12px 18px;font-size:14px}
+        .foot{padding:14px 18px 22px}
+        .printBtn{width:calc(100% - 36px);margin:0 18px 22px}
+      }
       @media print{body{background:#fff;padding:0}.sheet{box-shadow:none;border-radius:0}.printBtn{display:none}}
     </style></head><body>
     <div class="sheet">

@@ -4,7 +4,7 @@ const billingSettingsSchema = new mongoose.Schema({
   key: { type: String, default: "default", unique: true },
   billingCycleStartDay: { type: Number, default: 1, min: 1, max: 28 },
   fixedCharge: { type: Number, default: 0, min: 0 },
-  facPerKwh: { type: Number, default: 0, min: 0 },
+  facCharge: { type: Number, default: 0, min: 0 },   // Fuel Adjustment Charges: a flat amount per cycle, same as fixedCharge/otherCharges
   electricityDutyPercent: { type: Number, default: 0, min: 0 },
   wheelingChargePerKwh: { type: Number, default: 0, min: 0 },
   taxOnSalePerKwh: { type: Number, default: 0, min: 0 },

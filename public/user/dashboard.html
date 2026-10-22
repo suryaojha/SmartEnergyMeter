@@ -11,7 +11,7 @@
 <body>
   <header class="topbar">
     <div class="brand">⚡ Energy <span>Meter</span></div>
-    <div class="userbox"><span id="userName"></span><button id="notifBtn" class="icon-btn hidden" aria-label="Notifications">📣<span id="notifBadge" class="pill warn hidden" style="margin-left:2px">0</span></button><button id="themeBtn" class="icon-btn" aria-label="Toggle theme">◐</button><button class="btn small secondary" onclick="logout()">Logout</button></div>
+    <div class="userbox"><span id="userName"></span><button id="notifBtn" class="icon-btn hidden" aria-label="Notifications" style="position:relative;overflow:visible">📣<span id="notifBadge" class="pill warn hidden" style="position:absolute;top:-6px;right:-6px;min-width:18px;padding:1px 5px;line-height:1.4">0</span></button><button id="themeBtn" class="icon-btn" aria-label="Toggle theme">◐</button><button class="btn small secondary" onclick="logout()">Logout</button></div>
   </header>
   <main class="user-main">
     <div class="page-head">
@@ -174,13 +174,15 @@
         <h2 class="section-title" style="margin-top:0">Previous 3 months &mdash; MSEB bill history</h2>
         <p class="status-text" style="margin-top:0">Submit your last MSEB bills (reading + amount charged) so your administrator can approve them and we can show how our meter compares, month by month.</p>
         <div id="msebHistoryLocked" class="notice warn hidden">🔒 Your administrator has not allowed you to add MSEB data for this meter.</div>
-        <form id="msebHistoryForm" style="display:grid;gap:12px;max-width:520px;grid-template-columns:repeat(2,1fr)">
-          <div class="field"><label for="msebHistoryMonth">Billing month</label><input id="msebHistoryMonth" type="month" required></div>
-          <div class="field"><label for="msebHistoryReading">MSEB reading (kWh)</label><input id="msebHistoryReading" type="number" min="0" max="999999" step="0.01" required></div>
-          <div class="field" style="grid-column:1/-1"><label for="msebHistoryAmount">MSEB bill amount (₹)</label><input id="msebHistoryAmount" type="number" min="0" max="9999999" step="0.01" required></div>
-          <div class="field" style="grid-column:1/-1"><label for="msebHistoryPhoto">Photo of the bill / meter</label><input id="msebHistoryPhoto" type="file" accept="image/png,image/jpeg,image/webp" required></div>
-          <div class="actions" style="grid-column:1/-1"><button id="msebHistorySubmit" class="btn" type="submit">Submit for approval</button></div>
-          <p id="msebHistoryMessage" class="status-text" style="grid-column:1/-1" role="status" aria-live="polite"></p>
+        <form id="msebHistoryForm" style="max-width:560px">
+          <div class="form-row">
+            <div class="field"><label for="msebHistoryMonth">Billing month</label><input id="msebHistoryMonth" type="month" required></div>
+            <div class="field"><label for="msebHistoryReading">MSEB reading (kWh)</label><input id="msebHistoryReading" type="number" min="0" max="999999" step="0.01" required></div>
+            <div class="field"><label for="msebHistoryAmount">MSEB bill amount (₹)</label><input id="msebHistoryAmount" type="number" min="0" max="9999999" step="0.01" required></div>
+            <div class="field"><label for="msebHistoryPhoto">Photo of the bill / meter</label><input id="msebHistoryPhoto" type="file" accept="image/png,image/jpeg,image/webp" required></div>
+          </div>
+          <div class="actions" style="margin-top:12px"><button id="msebHistorySubmit" class="btn" type="submit">Submit for approval</button></div>
+          <p id="msebHistoryMessage" class="status-text" role="status" aria-live="polite"></p>
         </form>
         <div class="table-wrap" style="margin-top:14px"><table class="table stack"><thead><tr><th>Month</th><th>MSEB reading</th><th>MSEB bill</th><th>Status</th></tr></thead><tbody id="msebHistoryTable"></tbody></table></div>
         <div id="msebComparisonArea" class="hidden" style="margin-top:20px">

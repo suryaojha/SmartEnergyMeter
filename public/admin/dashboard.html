@@ -105,8 +105,8 @@
           <div class="card"><div class="label">Peak power</div><div class="metric" id="peakPower">--</div><div id="peakPowerAt" class="status-text">--</div></div>
         </div>
         <div class="panel"><div class="toolbar"><b>Bill estimate breakdown</b><b id="billTotal" class="metric compact">--</b></div><div class="grid three billing-breakdown">
-          <div>Energy charges <b id="energyCharges">--</b></div><div>FAC <b id="facCharge">--</b></div><div>Electricity duty <b id="dutyCharge">--</b></div>
-          <div>Wheeling <b id="wheelingCharge">--</b></div><div>Fixed charges <b id="fixedCharge">--</b></div><div>Other charges <b id="otherCharge">--</b></div>
+          <div>EC &mdash; Energy charges <b id="energyCharges">--</b></div><div>Fuel Adjustment Charges <b id="ovFacCharge">--</b></div><div>ED &mdash; Electricity duty <b id="dutyCharge">--</b></div>
+          <div>Wheeling charges <b id="wheelingCharge">--</b></div><div>Tax on sale <b id="ovTaxOnSale">--</b></div><div>FC &mdash; Fixed charge <b id="fixedCharge">--</b></div><div>Other charges <b id="otherCharge">--</b></div>
         </div></div>
         <div class="grid two" style="margin-top:14px">
           <div class="panel"><b>Hourly usage</b><div class="chart-box"><canvas id="hourlyChart"></canvas></div></div>
@@ -236,7 +236,7 @@
           <div class="form-row">
             <div class="field"><label for="billingCycleStartDay">Cycle starts on day (1-28)</label><input id="billingCycleStartDay" type="number" min="1" max="28" required></div>
             <div class="field"><label for="fixedCharge">FC &mdash; Fixed charge (₹ / cycle)</label><input id="fixedCharge" type="number" min="0" step="0.01" data-setting></div>
-            <div class="field"><label for="facPerKwh">Fuel Adjustment Charges (₹ / kWh)</label><input id="facPerKwh" type="number" min="0" step="0.01" data-setting></div>
+            <div class="field"><label for="facCharge">Fuel Adjustment Charges (₹ / cycle)</label><input id="facCharge" type="number" min="0" step="0.01" data-setting></div>
             <div class="field"><label for="electricityDutyPercent">ED &mdash; Electricity duty (%)</label><input id="electricityDutyPercent" type="number" min="0" step="0.01" data-setting></div>
             <div class="field"><label for="wheelingChargePerKwh">Wheeling charges (₹ / kWh)</label><input id="wheelingChargePerKwh" type="number" min="0" step="0.01" data-setting></div>
             <div class="field"><label for="taxOnSalePerKwh">Tax on sale (₹ / kWh)</label><input id="taxOnSalePerKwh" type="number" min="0" step="0.01" data-setting></div>

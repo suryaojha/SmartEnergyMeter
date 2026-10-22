@@ -185,7 +185,7 @@ function calculateBill(kwh, slabs, settings = {}, includeCycleCharges = false) {
     if (kwh >= min && kwh <= max) currentSlab = s;
   }
 
-  const fac = kwh * Number(settings.facPerKwh || 0);
+  const fac = includeCycleCharges ? Number(settings.facCharge || 0) : 0;
   const wheeling = kwh * Number(settings.wheelingChargePerKwh || 0);
   const taxOnSale = kwh * Number(settings.taxOnSalePerKwh || 0);
   const duty = (energyCharges + fac) * Number(settings.electricityDutyPercent || 0) / 100;
@@ -238,11 +238,10 @@ function liveHourlyCost(power, cumulativeKwh, slabs, settings) {
     .find(item => cumulative >= item.minKwh && (item.maxKwh == null || cumulative <= item.maxKwh));
   const usageKwh = Math.max(0, Number(power)) / 1000;
   const energyCharge = usageKwh * Number((slab || slabs[0]).ratePerKwh);
-  const fac = usageKwh * Number(settings.facPerKwh || 0);
   const wheeling = usageKwh * Number(settings.wheelingChargePerKwh || 0);
   const taxOnSale = usageKwh * Number(settings.taxOnSalePerKwh || 0);
-  const duty = (energyCharge + fac) * Number(settings.electricityDutyPercent || 0) / 100;
-  return Number((energyCharge + fac + wheeling + taxOnSale + duty).toFixed(2));
+  const duty = energyCharge * Number(settings.electricityDutyPercent || 0) / 100;
+  return Number((energyCharge + wheeling + taxOnSale + duty).toFixed(2));
 }
 
 // ---------- One-time passcodes (stored in the Otp collection) ----------
@@ -2044,7 +2043,7 @@ app.get("/api/admin/settings", auth, adminOnly, async (req, res) => {
 
 app.put("/api/admin/settings", auth, adminOnly, async (req, res) => {
   const numericFields = [
-    "fixedCharge", "facPerKwh", "electricityDutyPercent", "wheelingChargePerKwh", "taxOnSalePerKwh", "otherCharges",
+    "fixedCharge", "facCharge", "electricityDutyPercent", "wheelingChargePerKwh", "taxOnSalePerKwh", "otherCharges",
     "dailyCostLimit", "monthlyCostLimit", "dailyEnergyLimit", "consumptionTargetKwh",
     "minVoltage", "maxVoltage", "maxCurrent", "maxPower", "standbyPowerThreshold", "minPowerFactor"
   ];
